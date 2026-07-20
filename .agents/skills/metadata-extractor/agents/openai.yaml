@@ -1,0 +1,4 @@
+interface:
+  display_name: "Metadata Extractor"
+  short_description: "Inspect NumPy array metadata"
+  default_prompt: "Use $metadata-extractor to inspect this .npy file."
