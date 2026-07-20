@@ -16,7 +16,7 @@ def segment_ct_dataset(input_filepath: str, output_filepath: str, threshold: flo
     Returns:
         A status message indicating success and the save location, or an error message.
     """
-    pass # Implementation goes here
+    print("segment_ct_dataset")
 
 @mcp.tool()
 def visualize_slice(input_filepath: str, output_filepath: str, slice_index: int, axis: int = 0) -> str:
@@ -32,7 +32,7 @@ def visualize_slice(input_filepath: str, output_filepath: str, slice_index: int,
     Returns:
         A status message indicating success and the save location, or an error message.
     """
-    pass # Implementation goes here
+    print("visualize_slice")
 
 @mcp.tool()
 def skeletonize(input_filepath: str, output_filepath: str) -> str:
@@ -46,7 +46,7 @@ def skeletonize(input_filepath: str, output_filepath: str) -> str:
     Returns:
         A status message indicating success and the save location, or an error message.
     """
-    pass # Implementation goes here, calling skeletonize_mask internally
+    print("skeletonize")
 
 if __name__ == "__main__":
     # Run the FastMCP server, exposing the tools over standard I/O (default)
