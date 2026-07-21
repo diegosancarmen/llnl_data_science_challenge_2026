@@ -1,0 +1,74 @@
+{
+  "script_status": "success",
+  "executed_script_path": "/home/hannahdc/llnl_data_science_challenge_2026/part2/stage2a_volumetric_pipeline.py",
+  "extracted_features": {
+    "total_defects_found": 159,
+    "defect_summary_csv": "part2/stage2a_output/defect_summary.csv",
+    "mask_output_path": "part2/stage2a_output/mask_output.tif"
+  },
+  "validation_summary": {
+    "stage_2b_status": "NOT_RUN",
+    "total_revisions_attempted": 0
+  },
+  "execution_logs": {
+    "mesh": {
+      "triangles": 3498656,
+      "bytes": 174932884,
+      "bounds_min": [
+        -20.743635177612305,
+        -25.520002365112305,
+        -20.74884605407715
+      ],
+      "bounds_max": [
+        20.749141693115234,
+        25.520002365112305,
+        20.74677276611328
+      ],
+      "finite_vertices": true,
+      "binary_size_matches": true
+    },
+    "scan_shape": [
+      761,
+      815,
+      837
+    ],
+    "scan_dtype": ">u2",
+    "downsample_factor": 4,
+    "downsampled_scan_shape": [
+      191,
+      204,
+      210
+    ],
+    "registration_junctions": 10206,
+    "registration_struts": 18468,
+    "roi_xyz_min_downsampled": [
+      12,
+      10,
+      4
+    ],
+    "roi_xyz_max_exclusive_downsampled": [
+      197,
+      195,
+      188
+    ],
+    "axis_mapping": "registered x,y,z -> TIFF z,y,x",
+    "model_extent": [
+      41.49277687072754,
+      51.04000473022461,
+      41.49561882019043
+    ],
+    "registered_extent": [
+      714.9840698242188,
+      716.370361328125,
+      713.3509521484375
+    ],
+    "scale_pixels_per_stl_unit": 17.19099443340134,
+    "strut_radius_downsampled_voxels": 1.0,
+    "otsu_threshold": 40127.0,
+    "material_polarity": "high_intensity",
+    "candidate_voxels_after_component_filter": 326940,
+    "min_component_voxels": 20,
+    "z_slab_size": 32,
+    "tiff_read_mode": "tifffile.memmap; 4x downsampled copy used for complete analysis; bounded Z slabs for final masks"
+  }
+}
