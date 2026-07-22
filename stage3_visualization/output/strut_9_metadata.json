@@ -1,0 +1,95 @@
+{
+  "strut_id": 9,
+  "junction0_id": 1,
+  "junction1_id": 12,
+  "endpoint0_xyz_source_voxels": [
+    138.3161750337657,
+    51.78130232880832,
+    26.527176627513093
+  ],
+  "endpoint1_xyz_source_voxels": [
+    98.79572331838412,
+    52.091507427271225,
+    65.9830991191091
+  ],
+  "requested_bounds_xyz_source_voxels_half_open": [
+    [
+      74,
+      27,
+      2
+    ],
+    [
+      164,
+      78,
+      91
+    ]
+  ],
+  "clipped_bounds_xyz_source_voxels_half_open": [
+    [
+      74,
+      27,
+      2
+    ],
+    [
+      164,
+      78,
+      91
+    ]
+  ],
+  "clipped_bounds_zyx_tiff_indices_half_open": [
+    [
+      2,
+      27,
+      74
+    ],
+    [
+      91,
+      78,
+      164
+    ]
+  ],
+  "crop_shape_zyx": [
+    89,
+    51,
+    90
+  ],
+  "scan_shape_zyx": [
+    761,
+    815,
+    837
+  ],
+  "coordinate_convention": "registration XYZ source voxels; TIFF/NumPy ZYX",
+  "unit_cell_edge_idx": 15,
+  "thickness": 0.1,
+  "csv_row": {
+    "strut_id": "9",
+    "junction0_id": "1",
+    "junction1_id": "12",
+    "junction0_degree": "2",
+    "junction1_degree": "8",
+    "unit_cell_ids": "0",
+    "unit_cell_indices": "0,0,0",
+    "classification": "Nominal",
+    "expected_by_0point5_cad": "False",
+    "ct_material_occupancy": "0.2779713571071625",
+    "mean_intensity": "38068.2890625",
+    "length_um": "3244.0715762329105",
+    "trimmed_length_um": "1946.443115234375",
+    "longest_gap_um": "0.0",
+    "estimated_missing_volume_mm3": "0.5363536477088928",
+    "nominal_sampled_volume_mm3": "0.7428426742553711",
+    "centroid_x_um": "6886.915366668702",
+    "centroid_y_um": "3016.9857770156864",
+    "centroid_z_um": "2686.9609894943237",
+    "aspect_ratio": "0.0",
+    "sphericity": "1.0",
+    "voxel_size_um": "58.09"
+  },
+  "threshold": 40000.0,
+  "output_files": {
+    "ct_crop": "stage3_visualization/output/strut_9_ct_crop.tif",
+    "mask": "stage3_visualization/output/strut_9_mask.tif",
+    "render_3d": "stage3_visualization/output/strut_9_3d.png",
+    "metadata": "stage3_visualization/output/strut_9_metadata.json"
+  }
+}

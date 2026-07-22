@@ -1,0 +1,95 @@
+{
+  "strut_id": 867,
+  "junction0_id": 496,
+  "junction1_id": 502,
+  "endpoint0_xyz_source_voxels": [
+    771.2697216532626,
+    285.7162765754395,
+    105.37255659858377
+  ],
+  "endpoint1_xyz_source_voxels": [
+    731.8136025210529,
+    285.80766263490426,
+    65.85118943768272
+  ],
+  "requested_bounds_xyz_source_voxels_half_open": [
+    [
+      707,
+      261,
+      41
+    ],
+    [
+      797,
+      311,
+      131
+    ]
+  ],
+  "clipped_bounds_xyz_source_voxels_half_open": [
+    [
+      707,
+      261,
+      41
+    ],
+    [
+      797,
+      311,
+      131
+    ]
+  ],
+  "clipped_bounds_zyx_tiff_indices_half_open": [
+    [
+      41,
+      261,
+      707
+    ],
+    [
+      131,
+      311,
+      797
+    ]
+  ],
+  "crop_shape_zyx": [
+    90,
+    50,
+    90
+  ],
+  "scan_shape_zyx": [
+    761,
+    815,
+    837
+  ],
+  "coordinate_convention": "registration XYZ source voxels; TIFF/NumPy ZYX",
+  "unit_cell_edge_idx": 31,
+  "thickness": 0.1,
+  "csv_row": {
+    "strut_id": "867",
+    "junction0_id": "496",
+    "junction1_id": "502",
+    "junction0_degree": "2",
+    "junction1_degree": "8",
+    "unit_cell_ids": "35",
+    "unit_cell_indices": "8,3,0",
+    "classification": "Missing_Unintentional",
+    "expected_by_0point5_cad": "False",
+    "ct_material_occupancy": "0.017034456133842468",
+    "mean_intensity": "33320.75",
+    "length_um": "3244.071354637146",
+    "trimmed_length_um": "1946.44287109375",
+    "longest_gap_um": "1946.4428127822875",
+    "estimated_missing_volume_mm3": "0.7301886081695557",
+    "nominal_sampled_volume_mm3": "0.7428425550460815",
+    "centroid_x_um": "43657.05305297852",
+    "centroid_y_um": "16599.912424316408",
+    "centroid_z_um": "4973.19396057129",
+    "aspect_ratio": "2.7922803878784177",
+    "sphericity": "0.7802412265561643",
+    "voxel_size_um": "58.09"
+  },
+  "threshold": 40000.0,
+  "output_files": {
+    "ct_crop": "stage3_visualization/output/strut_867_ct_crop.tif",
+    "mask": "stage3_visualization/output/strut_867_mask.tif",
+    "render_3d": "stage3_visualization/output/strut_867_3d.png",
+    "metadata": "stage3_visualization/output/strut_867_metadata.json"
+  }
+}
