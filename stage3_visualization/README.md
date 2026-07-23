@@ -2,8 +2,9 @@
 
 This module maps a `strut_id` from the registration JSON to its two registered
 junctions, converts registration XYZ coordinates to TIFF ZYX indexing, and
-extracts a bounded CT crop. It writes the crop, a thresholded mask, a 3-D PNG
-render, and traceable coordinate metadata.
+extracts a bounded CT crop. It writes a 3-D PNG render and traceable coordinate
+metadata; the crop and thresholded mask are kept in memory and are not written
+as TIFF files.
 
 From the repository root, for the included data:
 
@@ -16,8 +17,28 @@ python -m stage3_visualization.strut_visualizer \
 ```
 
 Use `--threshold` to change the CT segmentation cutoff and `--margin-voxels`
-to enlarge or reduce the extracted region. The default border is 24 source
-voxels (three times the original 8-voxel border), and applies to the CT crop,
-binary mask, and 3-D PNG render. The default threshold is 40000 for the
-included uint16 scan; it should be adjusted for scans with a different
-intensity scale.
+to enlarge or reduce the extracted region. The default border is 10 source
+voxels and applies to the CT crop, binary mask, and 3-D PNG render. The
+visualizer records and labels the complete registered endpoint-to-endpoint
+centerline length in source voxels. Rendering defaults to `--downsample 1` so
+the full centerline is shown at source-voxel scale; the included lattice
+struts are approximately 55.85 source voxels long (about 3.24 mm), with the
+10-voxel border providing at least about 60 source voxels across the long
+crop axis. The default threshold is 40000 for the included uint16 scan; it
+should be adjusted for
+scans with a different intensity scale.
+
+## Interactive Napari graph viewer
+
+`visualize_struts.py` reads the registration JSON's `junctions` and `struts`
+arrays, converts registered XYZ coordinates to Napari ZYX coordinates, and
+uses the inventory CSV to color centerlines by classification:
+
+```bash
+python stage3_visualization/visualize_struts.py \
+  --scan "part2/data/missing_struts/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif" \
+  --registration "part2/data/missing_struts/registered_jsons/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.json" \
+  --csv part2/stage_2a_developer_output/all_struts_inventory.csv
+```
+
+Use `defect_summary.csv` instead when viewing only the 722 defect records.

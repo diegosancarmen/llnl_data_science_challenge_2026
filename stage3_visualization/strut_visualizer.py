@@ -60,11 +60,16 @@ def _read_csv_row(csv_path: Path | None, strut_id: int) -> dict[str, str] | None
     return None
 
 
+def _centerline_length_voxels(p0: np.ndarray, p1: np.ndarray) -> float:
+    """Return the registered endpoint-to-endpoint length in source voxels."""
+    return float(np.linalg.norm(p1 - p0))
+
+
 def extract_strut(
     scan_path: str | Path,
     registration_path: str | Path,
     strut_id: int,
-    margin_voxels: float = 24.0,
+    margin_voxels: float = 10.0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Extract a registration-aware crop around one strut.
 
@@ -99,6 +104,8 @@ def extract_strut(
         "junction1_id": int(strut["junction1"]),
         "endpoint0_xyz_source_voxels": p0.tolist(),
         "endpoint1_xyz_source_voxels": p1.tolist(),
+        "centerline_length_source_voxels": _centerline_length_voxels(p0, p1),
+        "centerline_length_note": "Full registered endpoint-to-endpoint length; source voxel coordinates are XYZ.",
         "requested_bounds_xyz_source_voxels_half_open": [xyz_lo.tolist(), xyz_hi.tolist()],
         "clipped_bounds_xyz_source_voxels_half_open": [clipped_lo.tolist(), clipped_hi.tolist()],
         "clipped_bounds_zyx_tiff_indices_half_open": [zyx_lo.tolist(), zyx_hi.tolist()],
@@ -110,21 +117,65 @@ def extract_strut(
     return crop, metadata
 
 
-def _render(crop: np.ndarray, metadata: dict[str, Any], output: Path, threshold: float, downsample: int) -> None:
+def _render(
+    crop: np.ndarray,
+    metadata: dict[str, Any],
+    output: Path,
+    threshold: float,
+    downsample: int,
+    voxel_alpha: float = 0.28,
+) -> None:
+    if not 0.0 < voxel_alpha <= 1.0:
+        raise ValueError("voxel_alpha must be greater than 0 and at most 1")
     mask = crop >= threshold
     step = max(1, int(downsample))
     display = mask[::step, ::step, ::step]
+    # ``crop`` is indexed ZYX, but mplot3d interprets the three dimensions of
+    # ``voxels`` as XYZ. Transpose before plotting so the registered XYZ
+    # centerline overlays the CT material in the correct orientation.
+    display_xyz = display.transpose(2, 1, 0)
     fig = plt.figure(figsize=(9, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    if display.any():
-        ax.voxels(display, facecolors="#e45756", edgecolor="none", alpha=0.85)
+    # Disable mplot3d's automatic depth-based artist reordering.  With the
+    # default behavior, voxel faces can be painted over the registered line
+    # even when the line was added afterward.  Explicit z-orders below keep
+    # the line as the foreground annotation.
+    ax = fig.add_subplot(111, projection="3d", computed_zorder=False)
+    if display_xyz.any():
+        voxel_artists = ax.voxels(
+            display_xyz,
+            facecolors="#e45756",
+            edgecolor="none",
+            alpha=voxel_alpha,
+        )
+        for artist in voxel_artists.values():
+            artist.set_zorder(1)
     else:
         ax.text2D(0.05, 0.95, "No voxels above threshold", transform=ax.transAxes)
     # Plot endpoints in local XYZ, converted to the plot's (x, y, z) axes.
     origin_xyz = np.asarray(metadata["clipped_bounds_xyz_source_voxels_half_open"][0], dtype=float)
     points = (np.asarray([metadata["endpoint0_xyz_source_voxels"], metadata["endpoint1_xyz_source_voxels"]]) - origin_xyz) / step
-    ax.plot(points[:, 0], points[:, 1], points[:, 2], color="#1f77b4", linewidth=2.5, label="registered centerline")
-    ax.set(xlabel="X crop voxels", ylabel="Y crop voxels", zlabel="Z crop voxels", title=f"Registered strut {metadata['strut_id']} (threshold {threshold:g})")
+    ax.plot(
+        points[:, 0], points[:, 1], points[:, 2],
+        color="#08306b", linewidth=4.0, solid_capstyle="round",
+        zorder=10, label="registered centerline",
+    )
+    ax.scatter(
+        points[:, 0], points[:, 1], points[:, 2],
+        color="#08306b", edgecolors="white", linewidths=0.8,
+        s=34, depthshade=False, zorder=11,
+    )
+    centerline_length = metadata["centerline_length_source_voxels"]
+    classification = metadata.get("csv_row", {}).get("classification", "Unclassified")
+    ax.set(
+        xlabel="X crop source voxels",
+        ylabel="Y crop source voxels",
+        zlabel="Z crop source voxels",
+        title=(
+            f"Registered strut {metadata['strut_id']} — {classification} — "
+            f"full centerline {centerline_length:.2f} source voxels "
+            f"(threshold {threshold:g})"
+        ),
+    )
     ax.legend(loc="upper left")
     fig.tight_layout()
     fig.savefig(output, dpi=160)
@@ -137,11 +188,16 @@ def visualize_strut(
     strut_id: int,
     output_dir: str | Path,
     csv_path: str | Path | None = None,
-    margin_voxels: float = 24.0,
+    margin_voxels: float = 10.0,
     threshold: float = 40000.0,
-    downsample: int = 2,
+    downsample: int = 1,
+    voxel_alpha: float = 0.28,
 ) -> dict[str, Any]:
-    """Extract, save, and render one registered strut region."""
+    """Extract, render, and save metadata for one registered strut region.
+
+    The CT crop and threshold mask are kept in memory for rendering and are
+    not written as TIFF files. This keeps visualization output lightweight.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     crop, metadata = extract_strut(scan_path, registration_path, int(strut_id), margin_voxels)
@@ -149,14 +205,18 @@ def visualize_strut(
     if row:
         metadata["csv_row"] = row
     stem = f"strut_{int(strut_id)}"
-    crop_path = output_dir / f"{stem}_ct_crop.tif"
-    mask_path = output_dir / f"{stem}_mask.tif"
     image_path = output_dir / f"{stem}_3d.png"
-    tifffile.imwrite(crop_path, crop, metadata={"axes": "ZYX", "strut_id": int(strut_id)})
-    tifffile.imwrite(mask_path, (crop >= threshold).astype(np.uint8), metadata={"axes": "ZYX", "threshold": threshold})
-    _render(crop, metadata, image_path, threshold, downsample)
+    _render(crop, metadata, image_path, threshold, downsample, voxel_alpha)
     metadata_path = output_dir / f"{stem}_metadata.json"
-    metadata.update({"threshold": threshold, "output_files": {"ct_crop": str(crop_path), "mask": str(mask_path), "render_3d": str(image_path), "metadata": str(metadata_path)}})
+    metadata.update({
+        "threshold": threshold,
+        "downsample": int(max(1, downsample)),
+        "voxel_plot_axis_order": "XYZ; transposed from crop ZYX before ax.voxels",
+        "output_files": {
+            "render_3d": str(image_path),
+            "metadata": str(metadata_path),
+        },
+    })
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
     return metadata
 
@@ -171,11 +231,22 @@ def main() -> None:
     parser.add_argument(
         "--margin-voxels",
         type=float,
-        default=24.0,
-        help="border around the registered strut endpoints in source voxels (default: 24)",
+        default=10.0,
+        help="border around the registered strut endpoints in source voxels (default: 10)",
     )
     parser.add_argument("--threshold", type=float, default=40000.0, help="CT intensity threshold for the mask/render")
-    parser.add_argument("--downsample", type=int, default=2, help="render-only voxel downsampling")
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=1,
+        help="render-only voxel downsampling; 1 preserves the full source-voxel centerline (default: 1)",
+    )
+    parser.add_argument(
+        "--voxel-alpha",
+        type=float,
+        default=0.28,
+        help="opacity of rendered CT voxels, from >0 to 1 (default: 0.28)",
+    )
     args = parser.parse_args()
     result = visualize_strut(
         scan_path=args.scan,
@@ -186,6 +257,7 @@ def main() -> None:
         margin_voxels=args.margin_voxels,
         threshold=args.threshold,
         downsample=args.downsample,
+        voxel_alpha=args.voxel_alpha,
     )
     print(json.dumps(result, indent=2))
 
