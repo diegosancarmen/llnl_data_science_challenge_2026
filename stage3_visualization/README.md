@@ -30,15 +30,18 @@ scans with a different intensity scale.
 
 ## Interactive Napari graph viewer
 
-`visualize_struts.py` reads the registration JSON's `junctions` and `struts`
-arrays, converts registered XYZ coordinates to Napari ZYX coordinates, and
-uses the inventory CSV to color centerlines by classification:
+`visualize_struts.py` reads the precomputed Napari centerline CSV, colors
+centerlines by classification, and opens a macro lattice view alongside a
+selected unit-cell CT view:
 
 ```bash
 python stage3_visualization/visualize_struts.py \
   --scan "part2/data/missing_struts/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif" \
-  --registration "part2/data/missing_struts/registered_jsons/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.json" \
-  --csv part2/stage_2a_developer_output/all_struts_inventory.csv
+  --centerlines part2/napari_visualizer/napari_centerlines.csv
 ```
 
-Use `defect_summary.csv` instead when viewing only the 722 defect records.
+Select a strut from the Inspector dropdown or Shift-click its centerline in
+the macro view. The selected strut becomes a wide yellow line, the macro
+camera zooms to it, and the micro view loads all struts assigned to its unit
+cell with CT context. Use `--unit-cell-padding-vox` to add border voxels to
+that crop and `--macro-zoom` to tune the focused macro camera level.
