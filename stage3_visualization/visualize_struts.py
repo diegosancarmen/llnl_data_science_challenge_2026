@@ -3,10 +3,10 @@ import napari
 import tifffile
 import pandas as pd
 import numpy as np
-from magicgui.widgets import Container, Label, ComboBox, TextEdit, RadioButtons
+from magicgui.widgets import Container, ComboBox, TextEdit
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive Strut Visualizer")
+    parser = argparse.ArgumentParser(description="Dual-Window Strut Visualizer")
     parser.add_argument('--scan', type=str, required=True, help='Path to the 3D TIFF scan')
     parser.add_argument('--centerlines', type=str, required=True, help='Path to napari_centerlines.csv')
     
@@ -22,13 +22,28 @@ def main():
     table = pd.read_csv(args.centerlines)
     id_col = 'strut_id'
 
-    print("Initializing Napari viewer...")
-    viewer = napari.Viewer(ndisplay=3)
+    # ==========================================
+    # 0. DISTINCT COLOR MAPPING (Fixed)
+    # ==========================================
+    def get_color(cls_val):
+        if pd.isna(cls_val): return 'magenta'
+        val = str(cls_val).lower()
+        if 'missing' in val: return 'red'
+        if 'partial' in val: return 'orange'
+        if 'nominal' in val: return 'cyan'
+        return 'yellow' # Fallback
+        
+    # Inject the exact categorical color into the dataframe as a new column
+    table['custom_display_color'] = table['inventory_classification'].apply(get_color)
+
+    print("Initializing Dual Napari Viewers...")
+    viewer_full = napari.Viewer(title="Full Lattice (Macro)", ndisplay=3)
+    viewer_iso = napari.Viewer(title="Isolated Strut (Micro)", ndisplay=3)
 
     # ==========================================
-    # 1. SETUP FULL LATTICE LAYERS (2x)
+    # 1. SETUP FULL LATTICE WINDOW
     # ==========================================
-    full_ct_layer = viewer.add_image(
+    viewer_full.add_image(
         volume_2x, 
         name='Full CT Scan (2x)', 
         colormap='gray', 
@@ -41,38 +56,29 @@ def main():
     direction = table[["direction_z_vox", "direction_y_vox", "direction_x_vox"]].to_numpy()
     vectors = np.stack((origin, direction), axis=1)
 
-    full_vectors_layer = viewer.add_vectors(
+    full_vectors_layer = viewer_full.add_vectors(
         vectors,
         name="All Centerlines",
-        edge_color=table["napari_color_hex"].tolist(),
-        edge_width=2, 
         properties=table, 
+        edge_color='custom_display_color', # Tell Napari to use our injected column!
+        edge_width=2, 
     )
 
     # ==========================================
-    # 2. SETUP ISOLATED LAYERS (1x, Initially Empty & Hidden)
+    # 2. SETUP ISOLATED WINDOW
     # ==========================================
-    isolated_ct_layer = viewer.add_image(
+    isolated_ct_layer = viewer_iso.add_image(
         np.zeros((1, 1, 1)), 
-        name='Isolated 3D CT (1x)', 
+        name='Isolated 3D CT', 
         colormap='gray', 
         rendering='mip', 
-        depiction='volume',
-        visible=False
+        depiction='volume'
     )
     
-    isolated_slice_layer = viewer.add_image(
-        np.zeros((1, 1, 1)), 
-        name='Isolated 2D Slice', 
-        colormap='gray',
-        visible=False
-    )
-    
-    isolated_vector_layer = viewer.add_vectors(
+    isolated_vector_layer = viewer_iso.add_vectors(
         np.zeros((1, 2, 3)), 
         name="Isolated Centerline",
-        edge_width=10, 
-        visible=False
+        edge_width=4
     )
 
     # ==========================================
@@ -80,18 +86,10 @@ def main():
     # ==========================================
     strut_choices = table[id_col].tolist()
     dropdown = ComboBox(choices=strut_choices, label="Select Strut:")
-    
-    view_mode = RadioButtons(
-        choices=["Full Lattice", "Isolated 3D", "Isolated 2D Slice"],
-        value="Full Lattice",
-        label="View Mode:"
-    )
-    
     metadata_display = TextEdit(label="Metadata:", value="Select a strut...")
     
     def update_ui(*args):
         strut_id = dropdown.value
-        mode = view_mode.value
         
         idx = table.index[table[id_col] == strut_id].tolist()[0]
         row = table.iloc[idx]
@@ -106,60 +104,37 @@ def main():
         )
         metadata_display.value = info
         
-        # --- Extract 1x High-Res Data from Disk ---
+        # --- Update ISOLATED Window ---
         z_min, z_max = int(row['bbox_z_min_inclusive']), int(row['bbox_z_max_exclusive'])
         y_min, y_max = int(row['bbox_y_min_inclusive']), int(row['bbox_y_max_exclusive'])
         x_min, x_max = int(row['bbox_x_min_inclusive']), int(row['bbox_x_max_exclusive'])
-        center_z = int(row['center_z_vox'])
         
-        # Update 3D Crop (shift it into place using translate)
-        isolated_ct_layer.data = volume[z_min:z_max, y_min:y_max, x_min:x_max]
+        # Extract the crop and calculate its true min/max values
+        crop_data = volume[z_min:z_max, y_min:y_max, x_min:x_max]
+        isolated_ct_layer.data = crop_data
         isolated_ct_layer.translate = (z_min, y_min, x_min)
         
-        # Update 2D Slice (extract a 1-voxel thick Z-slice)
-        isolated_slice_layer.data = volume[center_z:center_z+1, y_min:y_max, x_min:x_max]
-        isolated_slice_layer.translate = (center_z, y_min, x_min)
+        # FIX: Force Napari to recalculate contrast limits for this specific crop
+        c_min, c_max = float(np.min(crop_data)), float(np.max(crop_data))
+        if c_min < c_max:
+            isolated_ct_layer.contrast_limits = (c_min, c_max)
         
-        # Update Isolated Vector
         v_orig = [row['start_z_vox'], row['start_y_vox'], row['start_x_vox']]
         v_dir = [row['direction_z_vox'], row['direction_y_vox'], row['direction_x_vox']]
         isolated_vector_layer.data = np.array([[v_orig, v_dir]])
-        isolated_vector_layer.edge_color = [row['napari_color_hex']]
+        isolated_vector_layer.edge_color = row['custom_display_color']
         
-        # --- Handle Visibility Toggles ---
-        if mode == "Full Lattice":
-            full_ct_layer.visible = True
-            full_vectors_layer.visible = True
-            isolated_ct_layer.visible = False
-            isolated_slice_layer.visible = False
-            isolated_vector_layer.visible = False
-            viewer.camera.zoom = 5
-        elif mode == "Isolated 3D":
-            full_ct_layer.visible = False
-            full_vectors_layer.visible = False
-            isolated_ct_layer.visible = True
-            isolated_slice_layer.visible = False
-            isolated_vector_layer.visible = True
-            viewer.camera.zoom = 15
-        elif mode == "Isolated 2D Slice":
-            full_ct_layer.visible = False
-            full_vectors_layer.visible = False
-            isolated_ct_layer.visible = False
-            isolated_slice_layer.visible = True
-            isolated_vector_layer.visible = True
-            viewer.camera.zoom = 15
-            
-        # Highlight in full view just in case we swap back
+        # --- Update Cameras ---
+        center_pt = (row['center_z_vox'], row['center_y_vox'], row['center_x_vox'])
+        
+        viewer_full.camera.center = center_pt
+        viewer_iso.camera.center = center_pt
+        viewer_iso.camera.zoom = 10
+        
         full_vectors_layer.selected_data = {idx}
-        
-        # --- Fly Camera to Center ---
-        viewer.camera.center = (row['center_z_vox'], row['center_y_vox'], row['center_x_vox'])
 
-    # Connect both widgets to trigger the same update function
     dropdown.changed.connect(update_ui)
-    view_mode.changed.connect(update_ui)
 
-    # 4. Two-Way Sync: Shift + Click 3D Vector -> UI
     @full_vectors_layer.mouse_drag_callbacks.append
     def on_3d_click(layer, event):
         if 'Shift' not in event.modifiers:
@@ -176,10 +151,10 @@ def main():
             clicked_strut_id = table.iloc[clicked_index][id_col]
             dropdown.value = clicked_strut_id 
 
-    ui_container = Container(widgets=[dropdown, view_mode, metadata_display])
-    viewer.window.add_dock_widget(ui_container, name="Inspector", area="right")
+    ui_container = Container(widgets=[dropdown, metadata_display])
+    viewer_full.window.add_dock_widget(ui_container, name="Inspector", area="right")
 
-    print("Launching window...")
+    print("Launching windows...")
     napari.run()
 
 if __name__ == "__main__":
