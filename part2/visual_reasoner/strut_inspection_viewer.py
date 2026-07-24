@@ -9,9 +9,11 @@ intersecting the selected local crop are read.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import json
 import os
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,9 +238,74 @@ def export_interactive_geometry(output_dir: Path, material_surface, selected_str
     paths = {}
     for name, mesh in meshes.items():
         path = output_dir / f"{name}.vtp"
+        if isinstance(mesh, pv.UnstructuredGrid):
+            mesh = mesh.extract_surface(algorithm="dataset_surface")
         mesh.save(str(path))
         paths[name] = str(path)
     return paths
+
+
+
+def export_glb(output_dir: Path, material_surface, supported_surface, gap_surface,
+               selected_strut, neighboring_tubes, a: np.ndarray, b: np.ndarray,
+               endpoint_radius: float) -> str:
+    """Export a self-contained, layered inspection scene for browser/3D viewers."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plotter = pv.Plotter(off_screen=True)
+    plotter.set_background("#0f172a")
+    if material_surface is not None and material_surface.n_cells:
+        plotter.add_mesh(material_surface, name="ct_material", color="#9ca3af",
+                         opacity=0.30, smooth_shading=True)
+    if supported_surface is not None and supported_surface.n_cells:
+        plotter.add_mesh(supported_surface, name="material_supported", color="#22c55e",
+                         opacity=0.96, smooth_shading=True)
+    if gap_surface is not None and gap_surface.n_cells:
+        plotter.add_mesh(gap_surface, name="detected_gap_broken", color="#ef4444",
+                         opacity=0.98, smooth_shading=True)
+    plotter.add_mesh(selected_strut, name="selected_expected_strut", color="#facc15",
+                     opacity=1.0, smooth_shading=True)
+    for index, tube in enumerate(neighboring_tubes):
+        plotter.add_mesh(tube, name=f"nearby_strut_{index:04d}", color="#6b7280",
+                         opacity=0.24, smooth_shading=True)
+    for name, center in (("endpoint_node_0", a), ("endpoint_node_1", b)):
+        plotter.add_mesh(pv.Sphere(radius=endpoint_radius, center=center), name=name,
+                         color="#ffffff", opacity=1.0, smooth_shading=True)
+    path = output_dir / "inspection_model.glb"
+    gltf_path = output_dir / "inspection_model.gltf"
+    try:
+        plotter.export_gltf(str(gltf_path))
+    finally:
+        plotter.close()
+    document = json.loads(gltf_path.read_text(encoding="utf-8"))
+    buffers = document.get("buffers", [])
+    if not buffers:
+        raise ValueError("PyVista GLTF export did not produce buffers")
+    binary = bytearray()
+    buffer_offsets = []
+    for buffer in buffers:
+        uri = buffer.get("uri", "")
+        if not uri.startswith("data:") or ";base64," not in uri:
+            raise ValueError("PyVista GLTF export produced a non-embedded buffer")
+        binary.extend(b"\x00" * ((4 - len(binary) % 4) % 4))
+        buffer_offsets.append(len(binary))
+        binary.extend(base64.b64decode(uri.split(",", 1)[1]))
+    for view in document.get("bufferViews", []):
+        source_buffer = int(view.get("buffer", 0))
+        view["buffer"] = 0
+        view["byteOffset"] = buffer_offsets[source_buffer] + int(view.get("byteOffset", 0))
+    document["buffers"] = [{"byteLength": len(binary)}]
+    json_chunk = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    json_chunk += b" " * ((4 - len(json_chunk) % 4) % 4)
+    binary += b"\x00" * ((4 - len(binary) % 4) % 4)
+    total_length = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    with path.open("wb") as handle:
+        handle.write(struct.pack("<4sII", b"glTF", 2, total_length))
+        handle.write(struct.pack("<II", len(json_chunk), 0x4E4F534A))
+        handle.write(json_chunk)
+        handle.write(struct.pack("<II", len(binary), 0x004E4942))
+        handle.write(binary)
+    gltf_path.unlink()
+    return str(path)
 
 
 def surrounding_tubes(mapped_struts: list[tuple[int, int, int]], junctions: dict[int, np.ndarray],
@@ -338,6 +405,26 @@ def inspect(args: argparse.Namespace) -> dict:
         gaps = None
         focused_voxels = None
 
+    glb_path = None
+    if args.export_glb:
+        # Derive semantic overlays in context mode as well, using the selected
+        # strut's local CT corridor.
+        if args.mode == FOCUSED_MODE:
+            glb_material_surface = _combine_polydata((context_surface, green_surface, red_surface))
+            glb_supported_surface, glb_gap_surface = green_surface, red_surface
+        else:
+            _, supported_mask, gap_mask, _ = focus_material(
+                crop, start, a, b, args.threshold, args.focus_radius
+            )
+            glb_material_surface = ct_material_surface
+            glb_supported_surface = make_material_surface(crop, start, 0.5, supported_mask)
+            glb_gap_surface = make_material_surface(crop, start, 0.5, gap_mask)
+        glb_path = export_glb(
+            output_dir, glb_material_surface, glb_supported_surface, glb_gap_surface,
+            _tube(a, b, args.tube_radius), neighboring_tubes, a, b,
+            max(args.tube_radius * 1.25, 1.0),
+        )
+
     vtp_paths = export_interactive_geometry(
         output_dir,
         ct_material_surface,
@@ -362,6 +449,8 @@ def inspect(args: argparse.Namespace) -> dict:
         "tube_radius_voxels": args.tube_radius, "views": views,
         "interactive_vtp": vtp_paths,
     }
+    if glb_path is not None:
+        metadata["interactive_glb"] = glb_path
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "inspection.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -415,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tube-radius", type=float, default=6.0)
     parser.add_argument("--window-size", type=int, nargs=2, default=(900, 700), metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--interactive", action="store_true", help="Open PyVista window after saving PNGs")
+    parser.add_argument("--export-glb", action="store_true",
+                        help="Export inspection_model.glb with color-coded inspection layers")
     return parser
 
 
