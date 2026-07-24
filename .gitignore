@@ -175,6 +175,7 @@ result
 data/9x9x9_octet_lattice/9x9x9_octet_lattice.tif
 PacificVisDatasets/
 part1
-part2/data
+part2/data*
+!part2/data/tif_stacks*
 part2/.agents/temp.md
 part2/registration/modified_pipeline
