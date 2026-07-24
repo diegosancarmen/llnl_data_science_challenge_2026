@@ -178,6 +178,6 @@ part1
 part2/data*
 !part2/data/tif_stacks/
 part2/data/tif_stacks/*
-!part2/data/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1\ 1\ Slices.tif
+!"part2/data/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif"
 part2/.agents/temp.md
 part2/registration/modified_pipeline
