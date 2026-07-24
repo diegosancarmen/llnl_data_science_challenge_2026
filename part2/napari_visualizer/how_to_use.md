@@ -43,9 +43,9 @@ If your data resides in a WSL (Windows Subsystem for Linux) directory, but you a
 **Example Usage:**
 
 ```powershell
-python visualize_struts.py `
-  --scan "\\wsl.localhost\Ubuntu\home\user\path\to\volume.tif" `
-  --centerlines "\\wsl.localhost\Ubuntu\home\user\path\to\napari_centerlines.csv"
+python C:\Users\Enduser\llnl_data_science_challenge_2026\stage3_visualization\visualize_struts.py 
+  --scan "C:\Users\Enduser\llnl_data_science_challenge_2026\data\missing_struts\tif_stacks\210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif" `
+  --centerlines "C:\Users\Enduser\llnl_data_science_challenge_2026\part2\napari_visualizer\napari_centerlines.csv"
 
 ```
 
