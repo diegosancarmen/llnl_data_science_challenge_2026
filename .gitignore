@@ -16,3 +16,5 @@
 **/visualization/
 **/visualizations/
 **/*_output/
+__pycache__/
+*.lnk
