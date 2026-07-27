@@ -1,92 +1,72 @@
-# Napari centerline data preparation
+# Missing-Strut Methodology: Graph-Edge Tubular-Occupancy Analysis with Dual-CAD Comparison
 
-## Output
+## Method name
 
-[`napari_centerlines.csv`](napari_centerlines.csv) contains one row for each of
-the 18,468 candidate-registered struts. It is a new derived file; neither the
-candidate JSON nor `all_struts_inventory.csv` is modified.
+This workflow uses **graph-edge tubular-occupancy analysis with dual-CAD
+comparison**. It is an edge-wise CT metrology method: the registered lattice
+graph supplies one nominal centerline per strut, a cylindrical sampling tube
+measures CT material along that centerline, and a comparison of the 0% and
+0.5% CAD models distinguishes designed removals from unintended ones.
 
-The table uses the candidate affine registration from
-[`../../candidate_affine_registered.json`](../../candidate_affine_registered.json)
-and the regenerated adaptive Stage 2a inventory from
-[`../all_struts_inventory.csv`](../all_struts_inventory.csv). The source CT
-scan is opened only to read its shape `(Z, Y, X) = (761, 815, 837)`; no CT
-voxels are loaded or written during preparation.
+It does not identify defects by globally segmenting empty CT blobs. Instead,
+it treats every registered CAD strut as a graph edge between two junctions and
+asks whether material is present where that particular edge should be.
 
-## Coordinate convention
+## 1. Register the graph to CT
 
-The registration JSON stores positions as `XYZ` source voxels. Every geometry
-column intended for Napari is precomputed as `ZYX`, matching NumPy/TIFF and
-Napari array coordinates. The scan is isotropic at `58.09 µm/voxel`.
+The alignment check selected an affine XY correction using held-out,
+high-occupancy nominal struts. It improved material support from 0.885 to
+0.930. The final extraction reruns the sampler with that candidate
+registration.
 
-The output includes both source-voxel coordinates and micrometer coordinates:
+## 2. Segment and sample each strut
 
-- Use the `*_vox` columns with an image layer in source-voxel coordinates.
-- Use the `*_um` columns if the Napari image layer is added with
-  `scale=(58.09, 58.09, 58.09)`.
+CT intensity is thresholded with Otsu at 40,081. For each of the 18,468
+edges, the pipeline samples a cylindrical tube with a radius of 6 source
+voxels (348.54 micrometres) at 21 positions along the edge. It excludes the
+outer 20% at both ends so that material at junctions is not mistaken for an
+otherwise present strut.
 
-## Important columns
+## 3. Measure absence robustly
 
-| Columns | Purpose |
-|---|---|
-| `start_z_vox` … `start_x_vox` | Napari vector origin / line start in ZYX |
-| `direction_z_vox` … `direction_x_vox` | Napari vector direction in ZYX (`end - start`) |
-| `end_z_vox` … `end_x_vox` | Shapes-line endpoint in ZYX |
-| `napari_vector_zyx_json` | Preassembled `[[origin_zyx], [direction_zyx]]` vector record |
-| `napari_line_zyx_json` | Preassembled `[[start_zyx], [end_zyx]]` line record |
-| `center_*`, `length_vox`, `length_um_from_centerline` | Fast picking, labels, and measurements |
-| `bbox_*` | A 10-voxel-margin, scan-clipped ZYX crop for focus/inspection |
-| `napari_color_hex`, `napari_color_rgba_json`, `napari_layer` | Precomputed class styling and nominal/defect layer routing |
-| `inventory_*` | All fields from the regenerated Stage 2a inventory, including classification, defect metrics, unit-cell index, and original tube occupancy |
+For each trimmed tube, the pipeline computes CT material occupancy,
+per-station occupancy and the longest low-material run, plus estimated missing
+volume and physical gap length.
 
-## Minimal Napari loading example
+A station is considered empty when its material occupancy is below 5%. A
+strut must have a long empty run--at least 16 of the 21 stations--and very low
+total tube occupancy before it qualifies as missing. This guards against a
+local artifact, slight registration error, or a thin region being called a
+missing strut.
 
-```python
-import numpy as np
-import pandas as pd
-import tifffile
-import napari
+## 4. Separate intentional and unintentional removals
 
-root = "registration/alignment_check/stage2a_candidate_registration_output"
-table = pd.read_csv(f"{root}/napari_visualizer/napari_centerlines.csv")
-scan = tifffile.memmap(
-    "data/missing_struts/tif_stacks/"
-    "210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif"
-)
+The 0% and 0.5% CAD meshes are compared directly. Their facet differences are
+spatially clustered, excluding large remeshed-junction artifacts, to identify
+92 intended-removal regions. Those regions are mapped to graph edges using
+clearance and CT-supported symmetry selection.
 
-viewer = napari.Viewer(ndisplay=3)
-viewer.add_image(scan, name="CT", scale=(1, 1, 1))
+## 5. Assign the final label
 
-origin = table[["start_z_vox", "start_y_vox", "start_x_vox"]].to_numpy()
-direction = table[["direction_z_vox", "direction_y_vox", "direction_x_vox"]].to_numpy()
-vectors = np.stack((origin, direction), axis=1)  # (N, 2, 3), already ZYX
+- `Missing_Intentional`: the edge is CAD-designated as removed and passes the
+  CT absence test.
+- `Missing_Unintentional`: the edge is not CAD-designated but passes the same
+  absence test.
+- `Expected_Missing_But_Material_Present`: CAD says the strut is removed, but
+  CT shows too much material.
+- `Nominal`: every other strut.
 
-viewer.add_vectors(
-    vectors,
-    name="registered strut centerlines",
-    edge_color=table["napari_color_hex"].tolist(),
-    properties=table,
-)
+## Authoritative final result
 
-# Optional Shapes-line representation instead of Vectors:
-end = table[["end_z_vox", "end_y_vox", "end_x_vox"]].to_numpy()
-lines = np.stack((origin, end), axis=1)  # (N, 2, 3), already ZYX
-# viewer.add_shapes(lines, shape_type="line", edge_color=table["napari_color_hex"].tolist(), properties=table)
-```
+The authoritative final rerun is
+`registration/alignment_check/stage2a_candidate_registration_output`:
 
-For a physically scaled view, multiply the six coordinate columns by `58.09`
-or use the precomputed `*_um` columns and set the CT image scale to
-`(58.09, 58.09, 58.09)`.
+- 87 intentional missing struts
+- 331 unintentional missing struts
+- 5 expected-missing-but-material-present struts
+- 18,045 nominal struts
 
-## Reproducibility
-
-- [Preparation script](prepare_napari_centerlines.py)
-- [Preparation summary](napari_centerlines_summary.json)
-- [Candidate registration provenance](../candidate_registration_rerun_provenance.json)
-
-Run the script from `part2` with:
-
-```bash
-/home/hannahdc/anaconda3/bin/python \
-  registration/alignment_check/stage2a_candidate_registration_output/napari_visualizer/prepare_napari_centerlines.py
-```
+This supersedes the original developer run, which called 630 unintentional
+missing struts, and the alignment sensitivity table's 337 affine estimate. The
+final rerun uses the affine registration and recomputes the expected-removal
+support cutoff to 0.02532.
