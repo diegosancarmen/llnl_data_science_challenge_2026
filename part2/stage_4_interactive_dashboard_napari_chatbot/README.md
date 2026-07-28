@@ -16,8 +16,19 @@ stable Napari/chat session.
 
 Useful endpoints are `/frontend-config`, `/summary`, `/struts`,
 `/struts/{strut_id}`, `/struts/{strut_id}/stations`, `/state`, and
-`POST /select_struts` with `{"strut_ids": [1, 2]}`. The WebSocket endpoint is
+`POST /select_struts` with `{"strut_ids": [1, 2]}`. Streamlit uses `GET
+/dashboard/struts` for its one-time defect-summary load, `GET /state` for
+polling, and `POST /chat` for broker-backed chat. The WebSocket endpoint is
 `/ws`.
+
+Start the Streamlit client from the repository root after starting FastAPI:
+
+```powershell
+streamlit run part2/stage_4_interactive_dashboard_napari_chatbot/dashboard/app_defect_dashboard.py
+```
+
+The client defaults to `http://127.0.0.1:8000`. Set `DASHBOARD_API_URL` to
+use another broker URL.
 
 Next.js should use REST for initial data and connect to `/ws` for
 `STRUTS_SELECTED`, `CHAT_RESPONSE`, and `ERROR` events. Send chat messages as:

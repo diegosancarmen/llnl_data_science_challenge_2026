@@ -1,11 +1,42 @@
 """Chat-parser regression tests."""
 
 import unittest
+from time import perf_counter
 
 from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import _chat_response, store
 
 
 class ChatListingTests(unittest.TestCase):
+    def test_dashboard_summary_is_complete_and_geometry_free(self):
+        payload = store.dashboard_records
+
+        self.assertEqual(len(payload), len(store.defect_by_strut))
+        self.assertIn("missing_score", payload[0])
+        self.assertIn("needs_review", payload[0])
+        self.assertNotIn("start_x_vox", payload[0])
+
+    def test_indexed_compact_records_are_fast(self):
+        keys = store.defect_by_strut["_strut_key"].iloc[:1000]
+        started = perf_counter()
+        for key in keys:
+            store._compact_strut_record(key)
+
+        self.assertLess(perf_counter() - started, 2.0)
+
+    def test_strut_records_include_full_defect_summary(self):
+        record = store._compact_strut_record(str(store.centerlines.iloc[0]["_strut_key"]))
+
+        self.assertIn("defect_summary", record)
+        self.assertIn("missing_score", record["defect_summary"])
+        self.assertIn("needs_review", record["defect_summary"])
+
+    def test_active_strut_supports_station_deviation_question(self):
+        strut_id = int(store.defect_by_strut.iloc[0]["strut_id"])
+        response = _chat_response("Where is the largest deviation?", active_strut_id=strut_id)
+
+        self.assertEqual(response["strut_id"], strut_id)
+        self.assertIn("position_fraction", response["reply"])
+
     def test_bent_listing_returns_primary_defect_ids_with_a_cap(self):
         response = _chat_response("Which struts are classified as bent?")
         expected = store.defect_by_strut[

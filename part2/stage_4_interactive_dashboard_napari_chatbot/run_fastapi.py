@@ -82,7 +82,18 @@ class DataStore:
         self.defect_by_station["_strut_key"] = self.defect_by_station["strut_id"].astype(str)
         if self.centerlines["_strut_key"].duplicated().any():
             raise ValueError("centerlines must contain one row per strut_id")
+        if self.defect_by_strut["_strut_key"].duplicated().any():
+            raise ValueError("defect_by_strut must contain one row per strut_id")
         self.strut_keys = set(self.centerlines["_strut_key"])
+        self.centerline_by_key = self.centerlines.set_index("_strut_key", drop=False)
+        self.defect_by_key = self.defect_by_strut.set_index("_strut_key", drop=False)
+        self.station_indices_by_key = self.defect_by_station.groupby("_strut_key").indices
+
+        # Streamlit needs a complete, filterable defect table but not Napari
+        # geometry. Serialize this once at startup rather than rebuilding
+        # 18k records for every dashboard request.
+        self.dashboard_summary = self.defect_by_strut.drop(columns="_strut_key").copy()
+        self.dashboard_records = _records(self.dashboard_summary)
 
     @staticmethod
     def _value(row: pd.Series, *columns: str) -> Any:
@@ -94,15 +105,14 @@ class DataStore:
 
     def _compact_strut_record(self, key: str) -> Dict[str, Any]:
         """Merge the useful inventory and defect fields for dashboard clients."""
-        geometry = self.centerlines[self.centerlines["_strut_key"] == key].iloc[0]
-        defect_frame = self.defect_by_strut[self.defect_by_strut["_strut_key"] == key]
-        defect = defect_frame.iloc[0] if not defect_frame.empty else pd.Series(dtype=object)
+        geometry = self.centerline_by_key.loc[key]
+        defect = self.defect_by_key.loc[key] if key in self.defect_by_key.index else pd.Series(dtype=object)
 
         def value(*columns: str) -> Any:
             defect_value = self._value(defect, *columns)
             return defect_value if defect_value is not None else self._value(geometry, *columns)
 
-        return {
+        record = {
             "strut_id": self._value(geometry, "strut_id"),
             "classification": value("stage2_classification", "inventory_classification"),
             "primary_defect": value("primary_defect"),
@@ -124,6 +134,12 @@ class DataStore:
             "end_y_vox": self._value(geometry, "end_y_vox"),
             "end_x_vox": self._value(geometry, "end_x_vox"),
         }
+        record["defect_summary"] = (
+            {column: _json_value(value) for column, value in defect.items() if column != "_strut_key"}
+            if not defect.empty
+            else {}
+        )
+        return record
 
     def summary(self) -> Dict[str, Any]:
         classification_column = (
@@ -158,12 +174,16 @@ class DataStore:
 
     def strut_detail(self, strut_id: int | str) -> Dict[str, Any]:
         key = self.require_key(strut_id)
-        stations = self.defect_by_station[self.defect_by_station["_strut_key"] == key].drop(columns="_strut_key")
+        stations = self.station_frame(key)
         return {
             "strut_id": int(strut_id),
             "strut": self._compact_strut_record(key),
             "stations": _records(stations),
         }
+
+    def station_frame(self, key: str) -> pd.DataFrame:
+        indices = self.station_indices_by_key.get(key, [])
+        return self.defect_by_station.iloc[indices].drop(columns="_strut_key")
 
 
 def load_store() -> DataStore:
@@ -187,6 +207,7 @@ class SelectionRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    active_strut_id: Optional[int] = None
 
 
 class ConnectionManager:
@@ -266,6 +287,12 @@ def get_state():
     return current_state.model_dump() if hasattr(current_state, "model_dump") else current_state.dict()
 
 
+@app.get("/dashboard/struts")
+def dashboard_struts():
+    """Return the lightweight, complete defect table used by Streamlit."""
+    return {"count": len(store.dashboard_records), "items": store.dashboard_records}
+
+
 @app.get("/struts")
 def list_struts(
     offset: int = Query(0, ge=0),
@@ -314,7 +341,7 @@ def get_strut(strut_id: int):
 @app.get("/struts/{strut_id}/stations")
 def get_stations(strut_id: int):
     key = store.require_key(strut_id)
-    frame = store.defect_by_station[store.defect_by_station["_strut_key"] == key].drop(columns="_strut_key")
+    frame = store.station_frame(key)
     return {"strut_id": strut_id, "count": len(frame), "items": _records(frame)}
 
 
@@ -340,7 +367,17 @@ async def select_struts(request: SelectionRequest):
     return await publish_selection(request.strut_ids)
 
 
-def _chat_response(message: str) -> Dict[str, Any]:
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    """HTTP chat endpoint for clients that do not maintain a WebSocket."""
+    result = _chat_response(request.message, request.active_strut_id)
+    selected_ids = result.pop("select_strut_ids", None)
+    if selected_ids:
+        await publish_selection(selected_ids)
+    return {"message_id": str(uuid4()), **result}
+
+
+def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[str, Any]:
     text = message.strip()
     lower = text.casefold()
     normalized_text = re.sub(r"[\s_-]+", "", lower)
@@ -361,6 +398,40 @@ def _chat_response(message: str) -> Dict[str, Any]:
             ),
             "strut": detail,
             "references": [f"struts/{ids[0]}", f"struts/{ids[0]}/stations"],
+        }
+
+    requested_strut_id = ids[0] if ids else active_strut_id
+    if requested_strut_id is not None and any(word in lower for word in ("deviation", "offset", "largest", "where")):
+        detail = store.strut_detail(requested_strut_id)
+        stations = pd.DataFrame(detail["stations"])
+        offset_column = next(
+            (
+                column
+                for column in ("centroid_offset_um", "centroid_offset", "centerline_offset_um")
+                if column in stations.columns
+            ),
+            None,
+        )
+        if offset_column is not None:
+            offsets = pd.to_numeric(stations[offset_column], errors="coerce").dropna()
+            if not offsets.empty:
+                max_index = offsets.idxmax()
+                position = pd.to_numeric(stations.loc[max_index].get("position_fraction"), errors="coerce")
+                if pd.notna(position):
+                    return {
+                        "reply": (
+                            f"For strut {requested_strut_id}, the largest uploaded centerline offset is "
+                            f"{float(offsets.loc[max_index]):g} at position_fraction {float(position):.4g}."
+                        ),
+                        "strut_id": requested_strut_id,
+                        "max_offset_value": float(offsets.loc[max_index]),
+                        "max_offset_position_fraction": float(position),
+                        "references": [f"/struts/{requested_strut_id}/stations"],
+                    }
+        return {
+            "reply": f"The station data does not provide a usable centerline-offset series for strut {requested_strut_id}.",
+            "strut_id": requested_strut_id,
+            "references": [f"/struts/{requested_strut_id}/stations"],
         }
 
     if "review" in lower:
