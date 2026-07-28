@@ -1,11 +1,12 @@
 # Dual-Window Strut Visualizer
 
-This tool provides a high-performance, dual-window 3D inspection environment in Napari for triaging defected struts. It uses memory-mapping (`tifffile.memmap`) to handle large CT datasets with low RAM overhead, offering synchronized Macro (Full Lattice) and Micro (Isolated Strut) views.
+This tool provides a high-performance, dual-window 3D inspection environment in Napari for triaging defected struts. It uses memory-mapping (`tifffile.memmap`) to handle large CT datasets with low RAM overhead, offering synchronized Macro (Full Lattice) and Micro (Isolated Strut) views. The Micro metadata panel loads strut summaries and station-level measurements from the Stage 3 defect-analysis exports.
 
 ## Features
-*   **Dual-Window Sync:** Navigating in the Macro window automatically updates the Micro window with a 1x-resolution crop of the selected strut.
+*   **Dual-Window Sync:** Applying a set of IDs updates the Micro window with a 1x-resolution crop of the first selected strut.
+*   **Multi-Strut Selection:** Several strut IDs can be highlighted at once in the full-lattice view, while the Micro dropdown switches between them.
 *   **Categorical Color-Coding:** Nominal struts are rendered in solid Blue; defects (missing/partial) are rendered in solid Orange.
-*   **Interactive 3D Picking:** `Shift + Click` any strut in the 3D viewer to snap both cameras to it and load its metadata.
+*   **Interactive 3D Picking:** `Shift + Click` centerlines in the 3D viewer to append them to the selection, update both views, and load metadata.
 *   **Memory Efficient:** The CT volume is memory-mapped from disk. Only the 2x downsampled lattice and the specific `20x20x20` cropped voxel chunks are loaded into memory.
 
 ## 1. Environment Setup
@@ -32,6 +33,7 @@ You need two files to run the visualizer:
 
 1. **3D CT Scan:** A 3D `.tif` or `.tiff` file.
 2. **Centerlines Data:** `napari_centerlines.csv` containing pre-computed ZYX coordinates, bounding boxes, and inventory metadata.
+3. **Defect Analysis Data:** By default, the visualizer reads `part2/stage_3_defect_analysis/output/station_export_20260727T193004Z/defect_analysis_by_strut.csv` and `defect_analysis_by_station.csv`.
 
 ## 3. Running the Visualizer
 
@@ -53,5 +55,9 @@ python visualize_struts.py `
 
 * **Pan/Rotate:** Left-click and drag in the viewer.
 * **Zoom:** Scroll wheel.
-* **Select Strut (3D):** Hold `Shift` and `Left-Click` a centerline in the Full Lattice window.
-* **Select Strut (UI):** Use the dropdown menu in the Inspector pane on the right.
+* **Select Struts (UI):** Enter comma- or space-separated IDs in the `Strut IDs` field in the Full Lattice window, then click `Apply`.
+* **Select Struts (3D):** Hold `Shift` and `Left-Click` centerlines in the Full Lattice window to append them to the selection and apply it.
+* **Inspect a Selected Strut:** Use the `Selected Strut` dropdown in the individual-strut window to switch among the applied IDs.
+* **Clear Selection:** Click `Clear` in the Full Lattice window to remove all yellow highlights.
+
+The defect-analysis CSV locations can be overridden with `--defect-by-strut` and `--defect-by-station` when running the visualizer.

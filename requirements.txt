@@ -3,3 +3,7 @@ matplotlib
 fastmcp
 scikit-image
 tifffile
+fastapi
+uvicorn
+pandas
+websocket-client
