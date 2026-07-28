@@ -1,0 +1,88 @@
+{
+  "input": "/Users/samanthazhu/Desktop/DSC 2026/llnl_data_science_challenge_2026/data/missing_struts/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif",
+  "output_mask": "/Users/samanthazhu/Desktop/DSC 2026/llnl_data_science_challenge_2026/analysis/Strut Thickness/Step 0 Segmentation/segmentation/segmented_mask.tif",
+  "shape": [
+    761,
+    815,
+    837
+  ],
+  "dtype": "uint8",
+  "source_dtype": "uint16",
+  "source_intensity_min": 0.0,
+  "source_intensity_max": 65535.0,
+  "source_intensity_mean": 34296.14655017452,
+  "final_threshold": 35439,
+  "method": "global intensity threshold selected from exact uint16 histogram; Otsu initialization plus bounded candidate sweep, scored on slice 380 by plausible foreground fraction, 2-D connectivity, and component noise",
+  "foreground_voxels": 93477525,
+  "background_voxels": 425642430,
+  "foreground_fraction": 0.18006921926166372,
+  "slice_index_visualized": 380,
+  "iterations_run": 7,
+  "stop_reason": "Stopped after candidate sweep; selected highest-quality slice-380 score within the maximum of 10 iterations.",
+  "elapsed_seconds": 5.197778224945068,
+  "candidate_metrics": [
+    {
+      "foreground_voxels_slice": 682155,
+      "foreground_fraction_slice": 1.0,
+      "components_2d": 1,
+      "largest_component_fraction": 1.0,
+      "score": 0.34998500063090277,
+      "iteration": 1,
+      "threshold": 20439
+    },
+    {
+      "foreground_voxels_slice": 682155,
+      "foreground_fraction_slice": 1.0,
+      "components_2d": 1,
+      "largest_component_fraction": 1.0,
+      "score": 0.34998500063090277,
+      "iteration": 2,
+      "threshold": 26439
+    },
+    {
+      "foreground_voxels_slice": 682048,
+      "foreground_fraction_slice": 0.9998431441534549,
+      "components_2d": 1,
+      "largest_component_fraction": 1.0,
+      "score": 0.34998500063593135,
+      "iteration": 3,
+      "threshold": 29439
+    },
+    {
+      "foreground_voxels_slice": 215073,
+      "foreground_fraction_slice": 0.3152846493832047,
+      "components_2d": 1059,
+      "largest_component_fraction": 0.9780539630730031,
+      "score": 0.6959143201772756,
+      "iteration": 4,
+      "threshold": 32439
+    },
+    {
+      "foreground_voxels_slice": 69002,
+      "foreground_fraction_slice": 0.10115296376923133,
+      "components_2d": 231,
+      "largest_component_fraction": 0.5830410712732964,
+      "score": 0.7371141591049167,
+      "iteration": 5,
+      "threshold": 35439
+    },
+    {
+      "foreground_voxels_slice": 41876,
+      "foreground_fraction_slice": 0.06138780775630172,
+      "components_2d": 257,
+      "largest_component_fraction": 0.2803753940204413,
+      "score": 0.5153250993524915,
+      "iteration": 6,
+      "threshold": 38439
+    },
+    {
+      "foreground_voxels_slice": 22046,
+      "foreground_fraction_slice": 0.032318168158263154,
+      "components_2d": 186,
+      "largest_component_fraction": 0.01569445704436179,
+      "score": 0.3342689579675079,
+      "iteration": 7,
+      "threshold": 44439
+    }
+  ]
+}

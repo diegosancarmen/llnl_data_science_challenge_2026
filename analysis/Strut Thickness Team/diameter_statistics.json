@@ -1,0 +1,26 @@
+{
+  "n_measurements": 853058,
+  "diameter_voxels": {
+    "min": 2.0,
+    "max": 73.8105697631836,
+    "mean": 9.584335327148438,
+    "median": 7.4833149909973145,
+    "sd": 9.092508316040039,
+    "p01": 2.0,
+    "p05": 2.0,
+    "p25": 6.0,
+    "p50": 7.4833149909973145,
+    "p75": 8.717798233032227,
+    "p95": 32.31098937988281,
+    "p99": 49.030601501464844
+  },
+  "diameter_um_at_independent_pitch": {
+    "median": 434.7057800292969,
+    "mean": 556.7540283203125
+  },
+  "nominal_diameter_um": 350.0,
+  "independent_voxel_pitch_um": 58.09,
+  "nominal_diameter_voxels_at_independent_pitch": 6.025133413668446,
+  "implied_voxel_pitch_um_from_nominal_over_median": 46.77071597561536,
+  "pitch_divergence_percent": -19.485770398320952
+}

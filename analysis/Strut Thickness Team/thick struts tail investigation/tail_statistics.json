@@ -1,0 +1,82 @@
+{
+  "source_csv": "/Users/samanthazhu/Desktop/DSC 2026/llnl_data_science_challenge_2026/analysis/Strut Thickness/Step 5 Diameter/diameter_measurements.csv",
+  "n_measurements": 853058,
+  "thresholds_voxels": {
+    "p95": 32.31098937988281,
+    "p99": 49.030601501464844,
+    "p99_9": 65.42170715332031,
+    "extreme_fixed": 20.0
+  },
+  "all_measurements": {
+    "count": 853058,
+    "fraction_percent": 100.0,
+    "diameter_min": 2.0,
+    "diameter_median": 7.4833149909973145,
+    "diameter_max": 73.8105697631836,
+    "z_min_max": [
+      0,
+      760
+    ],
+    "y_min_max": [
+      0,
+      814
+    ],
+    "x_min_max": [
+      0,
+      836
+    ],
+    "centroid_zyx": [
+      381.05547571208524,
+      397.1265916268296,
+      407.7746143872984
+    ]
+  },
+  "upper_1_percent_tail": {
+    "count": 8611,
+    "fraction_percent": 1.0094272605145256,
+    "diameter_min": 49.030601501464844,
+    "diameter_median": 58.8217658996582,
+    "diameter_max": 73.8105697631836,
+    "z_min_max": [
+      15,
+      744
+    ],
+    "y_min_max": [
+      66,
+      721
+    ],
+    "x_min_max": [
+      87,
+      749
+    ],
+    "centroid_zyx": [
+      48.812449192892814,
+      314.4678899082569,
+      539.753803274881
+    ]
+  },
+  "extreme_ge_20_voxels": {
+    "count": 70479,
+    "fraction_percent": 8.261923573778102,
+    "diameter_min": 20.0,
+    "diameter_median": 35.44009017944336,
+    "diameter_max": 73.8105697631836,
+    "z_min_max": [
+      5,
+      754
+    ],
+    "y_min_max": [
+      19,
+      762
+    ],
+    "x_min_max": [
+      24,
+      776
+    ],
+    "centroid_zyx": [
+      462.8435136707388,
+      384.83876048184567,
+      435.57063806240154
+    ]
+  }
+}
