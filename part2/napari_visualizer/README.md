@@ -28,20 +28,29 @@ crop axis. The default threshold is 40000 for the included uint16 scan; it
 should be adjusted for
 scans with a different intensity scale.
 
-## Interactive Napari graph viewer
+## Interactive PyVista graph viewer
 
-`visualize_struts.py` reads the precomputed Napari centerline CSV, colors
+`visualize_struts.py` reads the precomputed centerline CSV, colors
 centerlines by classification, and opens a macro lattice view alongside a
-selected unit-cell CT view:
+selected unit-cell CT view. CT context uses grayscale maximum-intensity
+projection, matching the Napari visualizer; the macro grid defaults to 2x
+downsampling and the micro crop defaults to full resolution.
 
 ```bash
-python stage3_visualization/visualize_struts.py \
+python part2/napari_visualizer/visualize_struts.py \
   --scan "part2/data/missing_struts/tif_stacks/210127_Brian_Tran_strut_lattices_0point5dash1 1 Slices.tif" \
   --centerlines part2/napari_visualizer/napari_centerlines.csv
 ```
 
-Select a strut from the Inspector dropdown or Shift-click its centerline in
+Select a strut from the Inspector dropdown or Shift-left-click its centerline in
 the macro view. The selected strut becomes a wide yellow line, the macro
 camera zooms to it, and the micro view loads all struts assigned to its unit
 cell with CT context. Use `--unit-cell-padding-vox` to add border voxels to
-that crop and `--macro-zoom` to tune the focused macro camera level.
+that crop, `--macro-zoom` to tune the focused macro camera level,
+`--macro-downsample` to further reduce macro CT memory, and
+`--micro-downsample` to control the selected unit-cell volume resolution.
+Use the `Visible layers` controls in the Macro window to independently show
+or hide CT, all centerlines, and selected centerlines; the Micro controls do
+the same for CT, unit-cell centerlines, and the selected centerline. Use
+`--macro-downsample` and `--micro-downsample` to balance CT detail and
+memory use.

@@ -1,13 +1,14 @@
-# Dual-Window Strut Visualizer
+# Dual-Window PyVista Strut Visualizer
 
-This tool provides a high-performance, dual-window 3D inspection environment in Napari for triaging defected struts. It uses memory-mapping (`tifffile.memmap`) to handle large CT datasets with low RAM overhead, offering synchronized Macro (Full Lattice) and Micro (Isolated Strut) views. The Micro metadata panel loads strut summaries and station-level measurements from the Stage 3 defect-analysis exports.
+This tool provides a high-performance, dual-window 3D inspection environment in PyVista for triaging defected struts. It uses memory-mapping (`tifffile.memmap`) to handle large CT datasets with low RAM overhead, offering synchronized Macro (Full Lattice) and Micro (Isolated Strut) views. Each view renders CT as a grayscale maximum-intensity projection, matching the Napari visualizer. The Micro metadata panel loads strut summaries and station-level measurements from the Stage 3 defect-analysis exports.
 
 ## Features
-*   **Dual-Window Sync:** Applying a set of IDs updates the Micro window with a 1x-resolution crop of the first selected strut.
+*   **Dual-Window Sync:** Applying a set of IDs updates the Micro window with a bounded 1x-resolution crop of the first selected strut.
 *   **Multi-Strut Selection:** Several strut IDs can be highlighted at once in the full-lattice view, while the Micro dropdown switches between them.
 *   **Categorical Color-Coding:** Nominal struts are rendered in solid Blue; defects (missing/partial) are rendered in solid Orange.
-*   **Interactive 3D Picking:** `Shift + Click` centerlines in the 3D viewer to append them to the selection, update both views, and load metadata.
-*   **Memory Efficient:** The CT volume is memory-mapped from disk. Only the 2x downsampled lattice and the specific `20x20x20` cropped voxel chunks are loaded into memory.
+*   **Interactive 3D Picking:** `Shift + Left-Click` centerlines in the Macro viewer to append them to the selection, update both views, and load metadata.
+*   **Layer Controls:** The Macro window independently shows or hides CT, all centerlines, and selected centerlines; the Micro window does the same for CT, unit-cell centerlines, and the selected centerline.
+*   **Memory Efficient:** The CT volume is memory-mapped from disk. The Macro CT is materialized only as a 2x-downsampled volume (1/8 of the source voxel count); only the selected unit-cell crop is materialized for the full-resolution Micro volume. The FastAPI/Streamlit process never receives CT voxels.
 
 ## 1. Environment Setup
 
@@ -20,10 +21,10 @@ conda activate dssi_env_win
 
 ```
 
-Install the required dependencies. Note that `napari[all]` is required to install the underlying Qt GUI framework:
+Install the required dependencies. `pyvistaqt` uses the Qt GUI framework supplied by PyQt6:
 
 ```bash
-pip install "napari[all]" tifffile pandas numpy magicgui
+pip install pyvista pyvistaqt PyQt6 tifffile pandas numpy websocket-client
 
 ```
 
@@ -59,5 +60,8 @@ python visualize_struts.py `
 * **Select Struts (3D):** Hold `Shift` and `Left-Click` centerlines in the Full Lattice window to append them to the selection and apply it.
 * **Inspect a Selected Strut:** Use the `Selected Strut` dropdown in the individual-strut window to switch among the applied IDs.
 * **Clear Selection:** Click `Clear` in the Full Lattice window to remove all yellow highlights.
+* **Show or Hide Layers:** Use the `Visible layers` checkboxes in the Macro window for CT, all centerlines, and selected centerlines; use those in the Micro window for CT, unit-cell centerlines, and the selected centerline.
+
+Use `--macro-downsample` (default `2`) to reduce Macro CT memory further, and `--micro-downsample` (default `1`) to control the selected unit-cell volume resolution. Rotate and zoom the maximum-intensity-projection CT volumes to inspect material around the colored centerlines.
 
 The defect-analysis CSV locations can be overridden with `--defect-by-strut` and `--defect-by-station` when running the visualizer.
