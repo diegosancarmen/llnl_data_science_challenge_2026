@@ -9,6 +9,7 @@ from magicgui.widgets import ComboBox, Container, TextEdit
 
 SELECTED_STRUT_COLOR = "yellow"
 SELECTED_STRUT_WIDTH = 5
+TRANSPARENT_STRUT_COLOR = "transparent"
 
 
 def main():
@@ -186,11 +187,18 @@ def main():
             isolated_ct_layer.contrast_limits = (c_min, c_max)
 
         isolated_context_layer.data = vectors[context_indices]
-        isolated_context_layer.edge_color = [base_colors[i] for i in context_indices]
+        # The selected strut is drawn separately as the yellow highlight, so
+        # hide its classification-colored copy in the unit-cell context layer.
+        isolated_context_layer.edge_color = [
+            TRANSPARENT_STRUT_COLOR if i == index else base_colors[i]
+            for i in context_indices
+        ]
         isolated_vector_layer.data = vectors[index:index + 1]
 
         highlighted_colors = list(base_colors)
-        highlighted_colors[index] = SELECTED_STRUT_COLOR
+        # Keep the full-lattice base layer from showing through the separate
+        # yellow selected-centerline overlay.
+        highlighted_colors[index] = TRANSPARENT_STRUT_COLOR
         full_vectors_layer.edge_color = highlighted_colors
         full_vectors_layer.selected_data = {index}
         selected_full_layer.data = vectors[index:index + 1]
