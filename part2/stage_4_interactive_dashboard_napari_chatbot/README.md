@@ -1,74 +1,95 @@
-# FastAPI Dashboard Broker
+# Stage 4 Interactive Dashboard
 
-The broker loads the precomputed Napari centerlines and Stage 3 defect
-analysis exports. It does not load the CT volume; the Napari process owns that
-large file.
+This workflow runs the FastAPI broker, browser-based PyVista viewer, and
+Streamlit dashboard from a native Windows Conda environment. The CT volume is
+read by the PyVista viewer; FastAPI serves metadata, chat, and shared strut
+selection state.
 
-Run from the repository root in Windows PowerShell:
+## 1. Create the Windows environment
+
+Run these commands in Windows PowerShell. The repository is stored in WSL,
+so use its Windows network path:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+
+cd \\wsl.localhost\Ubuntu\home\hannahdc\llnl_data_science_challenge_2026
+
+conda create --prefix .\dssi_env_win python=3.11 -y
+.\dssi_env_win\Scripts\activate
+
+pip install -r part2\stage_4_interactive_dashboard_napari_chatbot\windows_requirements.txt
+```
+
+If PowerShell reports that the environment is already present, skip the
+`conda create` command and activate it with:
+
+```powershell
+.\dssi_env_win\Scripts\activate
+```
+
+## 2. Start the FastAPI broker
+
+Open a new PowerShell window, repeat the environment activation and repository
+directory commands above, then run:
 
 ```powershell
 uvicorn part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi:app --host 127.0.0.1 --port 8000
 ```
 
-For active code development, add `--reload`. Reloading intentionally restarts
-the broker and disconnects active WebSocket clients, so leave it off for a
-stable Napari/chat session.
+The broker provides the REST and WebSocket endpoints used by the viewer and
+dashboard. Leave this window running.
 
-Useful endpoints are `/frontend-config`, `/summary`, `/struts`,
-`/struts/{strut_id}`, `/struts/{strut_id}/stations`, `/state`, and
-`POST /select_struts` with `{"strut_ids": [1, 2]}`. Streamlit uses `GET
-/dashboard/struts` for its one-time defect-summary load, `GET /state` for
-polling, and `POST /chat` for broker-backed chat. The WebSocket endpoint is
-`/ws`.
+## 3. Start the browser PyVista viewer
 
-Start the Streamlit client from the repository root after starting FastAPI:
+Open another PowerShell window, activate the environment, change to the
+repository directory, and run:
 
 ```powershell
-streamlit run part2/stage_4_interactive_dashboard_napari_chatbot/dashboard/app_defect_dashboard.py
+python -m part2.napari_visualizer.web_visualizer --api-url http://127.0.0.1:8000
 ```
 
-The client defaults to `http://127.0.0.1:8000`. Set `DASHBOARD_API_URL` to
-use another broker URL.
+The viewer normally serves the embedded two-pane visualization at
+`http://127.0.0.1:8081`. It may take time to build the initial CT scene; wait
+for `initialization complete` in the viewer window.
 
-Next.js should use REST for initial data and connect to `/ws` for
-`STRUTS_SELECTED`, `CHAT_RESPONSE`, and `ERROR` events. Send chat messages as:
+For a Windows/WSL setup where Streamlit cannot reach the default viewer bind
+address, use:
 
-```json
-{
-  "event_type": "CHAT_REQUEST",
-  "data": {"message": "How many struts need review?"}
-}
+```powershell
+python -m part2.napari_visualizer.web_visualizer --host 0.0.0.0 --api-url http://127.0.0.1:8000
 ```
 
-The Napari viewer can subscribe to dashboard selections by passing
-`--api-url http://localhost:8000` (or setting `NAPARI_API_URL`). Standalone
-Napari use remains unchanged when that option is omitted.
+## 4. Start the Streamlit dashboard
 
-The default data paths can be overridden with `NAPARI_CENTERLINES_CSV`,
-`DEFECT_BY_STRUT_CSV`, and `DEFECT_BY_STATION_CSV`. Local Next.js origins are
-allowed by default; set `DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list
-for another deployment.
+Open a third PowerShell window, activate the environment, change to the
+repository directory, and run:
 
-## Terminal chatbot
+```powershell
+streamlit run part2/stage_4_interactive_dashboard_napari_chatbot/dashboard/app_reactive_v2.py
+```
 
-With the broker running, start the terminal client from the repository root:
+Open the URL printed by Streamlit, normally
+`http://127.0.0.1:8501`. The dashboard includes defect filters, station
+trends, raw data, chat, and the embedded PyVista viewer.
+
+The dashboard uses FastAPI at `http://127.0.0.1:8000` by default. To use a
+different broker URL, set `DASHBOARD_API_URL` before starting Streamlit:
+
+```powershell
+$env:DASHBOARD_API_URL = "http://127.0.0.1:8000"
+streamlit run part2/stage_4_interactive_dashboard_napari_chatbot/dashboard/app_reactive_v2.py
+```
+
+## Optional: terminal chatbot
+
+With FastAPI running, start the terminal chatbot from an activated PowerShell
+window in the repository root:
 
 ```powershell
 python .\part2\stage_4_interactive_dashboard_napari_chatbot\run_agent_cli.py
 ```
 
-The client prints examples when it starts. Type `help` to show them again,
-or use prompts such as `How many struts need review?`, `Inspect strut 42`,
-`Which struts are classified as Bent?`,
-`List struts with Stage 2 classification Missing_Intentional`,
-`Which struts are Missing Intentional?`,
-`Summarize the defects`, or `Select struts 12 and 18`. Listing prompts return
-up to 100 IDs plus the total matching count. Selection prompts are broadcast
-to connected Napari clients. This client talks directly to FastAPI;
-it does not use Ollama or `OPENAI_API_KEY`. To use a different broker URL, set
-`DASHBOARD_WEBSOCKET_URL`, for example:
-
-```powershell
-$env:DASHBOARD_WEBSOCKET_URL = "ws://127.0.0.1:8000/ws"
-python .\part2\stage_4_interactive_dashboard_napari_chatbot\run_agent_cli.py
-```
+The chatbot talks directly to FastAPI and can answer defect-summary questions,
+inspect struts, and broadcast strut selections to the connected viewer and
+dashboard.

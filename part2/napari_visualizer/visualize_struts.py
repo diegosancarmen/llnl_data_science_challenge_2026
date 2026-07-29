@@ -35,23 +35,25 @@ from PyQt6.QtWidgets import (
 from pyvistaqt import QtInteractor
 from vtkmodules.vtkRenderingCore import vtkCellPicker
 
+from part2.napari_visualizer.scene_data import (
+    TRANSPARENT_RGBA,
+    classification_color,
+    image_grid,
+    make_line_mesh,
+    parse_strut_ids,
+    unit_cell_context_color,
+)
+
 
 SELECTED_STRUT_COLOR = "yellow"
 SELECTED_STRUT_WIDTH = 6
 ALL_STRUT_WIDTH = 3
-TRANSPARENT_RGBA = (0, 0, 0, 0)
 DEFAULT_MACRO_DOWNSAMPLE = 2
 DEFAULT_MICRO_DOWNSAMPLE = 1
 
 # The selection and micro-context layers start empty and are populated after
 # the user selects a strut. PyVista 0.48+ rejects empty meshes by default.
 pv.global_theme.allow_empty_mesh = True
-
-
-def parse_strut_ids(value: str) -> list[str]:
-    """Return unique comma- or whitespace-separated strut IDs in entry order."""
-    tokens = str(value or "").replace(",", " ").split()
-    return list(dict.fromkeys(tokens))
 
 
 def format_strut_metadata(strut_row: pd.Series | None, geometry_row: pd.Series) -> str:
@@ -82,59 +84,6 @@ def format_strut_metadata(strut_row: pd.Series | None, geometry_row: pd.Series) 
             f"End (vox ZYX): {value('end_z_vox')}, {value('end_y_vox')}, {value('end_x_vox')}",
         ]
     )
-
-
-def classification_color(value: object) -> str:
-    """Match the prior Napari classification colors."""
-    if pd.isna(value):
-        return "magenta"
-    label = str(value).lower()
-    if "missing" in label:
-        return "red"
-    if "partial" in label:
-        return "orange"
-    if "nominal" in label:
-        return "cyan"
-    return "yellow"
-
-
-def unit_cell_context_color(value: object) -> str:
-    """Color unselected unit-cell struts as nominal (blue) or defective (red)."""
-    return "blue" if not pd.isna(value) and "nominal" in str(value).lower() else "red"
-
-
-def zyx_to_xyz(points_zyx: np.ndarray) -> np.ndarray:
-    """Convert source TIFF coordinates to PyVista's XYZ world-coordinate order."""
-    return np.ascontiguousarray(points_zyx[:, ::-1], dtype=float)
-
-
-def make_line_mesh(endpoints_zyx: np.ndarray, colors: list[object] | None = None) -> pv.PolyData:
-    """Create one line cell per strut, retaining the input row as the cell ID."""
-    endpoints_xyz = zyx_to_xyz(endpoints_zyx.reshape(-1, 3))
-    line_count = len(endpoints_zyx)
-    mesh = pv.PolyData(endpoints_xyz)
-    # PolyData(point_array) adds one vertex cell per point. Remove those so
-    # each cell remains a one-to-one, pickable/colorable representation of a
-    # strut line.
-    mesh.verts = np.empty(0, dtype=np.int64)
-    mesh.lines = np.column_stack(
-        (np.full(line_count, 2, dtype=np.int64), np.arange(2 * line_count).reshape(line_count, 2))
-    ).ravel()
-    if colors is not None:
-        mesh.cell_data["rgba"] = np.asarray([pv.Color(color).int_rgba for color in colors], dtype=np.uint8)
-    return mesh
-
-
-def image_grid(volume_zyx: np.ndarray, downsample: int, origin_zyx: np.ndarray) -> pv.ImageData:
-    """Materialize an explicitly downsampled ZYX array as a source-aligned ImageData grid."""
-    sampled = np.ascontiguousarray(volume_zyx[::downsample, ::downsample, ::downsample])
-    grid = pv.ImageData()
-    grid.dimensions = tuple(np.asarray(sampled.shape[::-1], dtype=int))
-    grid.spacing = (downsample, downsample, downsample)
-    grid.origin = tuple(np.asarray(origin_zyx[::-1], dtype=float))
-    # VTK point scalars are ordered X fastest; the TIFF data is ZYX.
-    grid.point_data["ct_intensity"] = np.ascontiguousarray(sampled.transpose(2, 1, 0)).ravel(order="F")
-    return grid
 
 
 class ApiSelectionBridge(QObject):

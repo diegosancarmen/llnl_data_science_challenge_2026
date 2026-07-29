@@ -10,3 +10,7 @@ websocket-client
 pyvista
 pyvistaqt
 PyQt6
+requests
+trame
+trame-vtk
+trame-vuetify

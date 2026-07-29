@@ -1,4 +1,6 @@
-"""Streamlit client for the shared FastAPI/Napari defect-analysis broker."""
+"""FastAPI-backed Streamlit defect-inspection dashboard with embedded PyVista views."""
+
+from __future__ import annotations
 
 import os
 from typing import Any
@@ -8,10 +10,31 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 API_URL = os.getenv("DASHBOARD_API_URL", "http://127.0.0.1:8000").rstrip("/")
+VIEWER_URL = os.getenv("PYVISTA_VIEWER_URL", "http://127.0.0.1:8081").rstrip("/")
+VIEWER_TIMEOUT = float(os.getenv("PYVISTA_VIEWER_TIMEOUT", "20"))
 TIMEOUT = float(os.getenv("DASHBOARD_API_TIMEOUT", "5"))
 SUMMARY_TIMEOUT = float(os.getenv("DASHBOARD_SUMMARY_TIMEOUT", "30"))
+
+SUMMARY = {
+    "primary_defect": ["primary_defect", "primary defect", "defect", "defect_type"],
+    "stage2_classification": ["stage2_classification", "stage2 classification", "classification"],
+    "needs_review": ["needs_review", "needs review", "review_required"],
+    "diameter": ["diameter", "equivalent_diameter", "effective_diameter_um", "median_effective_diameter_um"],
+    "nominal": ["nominal_diameter", "nominal_diameter_um", "design_diameter", "cad_diameter"],
+    "ratio": ["diameter_ratio", "diameter_to_nominal", "diameter_to_nominal_ratio"],
+    "deviation": ["max_centerline_deviation", "max_centerline_deviation_um", "maximum_centerline_offset_um"],
+    "occupancy": ["occupancy", "material_occupancy", "ct_material_occupancy"],
+}
+STATION = {
+    "position": ["position_fraction", "station_fraction", "position", "fraction"],
+    "occupancy": ["material_occupancy", "occupancy", "material_fraction"],
+    "diameter": ["equivalent_diameter", "diameter", "effective_diameter_um", "equivalent_radius", "radius"],
+    "offset": ["centroid_offset", "centroid_offset_um", "centerline_offset_um", "centerline_deviation"],
+}
+
 st.set_page_config(page_title="Lattice NDE Dashboard", layout="wide")
 
 
@@ -28,9 +51,8 @@ def api_post(path: str, payload: dict) -> dict:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def load_struts() -> pd.DataFrame:
-    payload = api_get("/dashboard/struts", request_timeout=SUMMARY_TIMEOUT)
-    frame = pd.DataFrame(payload.get("items", []))
+def load_summary() -> pd.DataFrame:
+    frame = pd.DataFrame(api_get("/dashboard/struts", request_timeout=SUMMARY_TIMEOUT).get("items", []))
     if frame.empty or "strut_id" not in frame:
         raise ValueError("FastAPI returned no strut summary records")
     frame["strut_id"] = pd.to_numeric(frame["strut_id"], errors="raise").astype(int)
@@ -38,221 +60,235 @@ def load_struts() -> pd.DataFrame:
 
 
 def load_stations(strut_id: int) -> pd.DataFrame:
-    return pd.DataFrame(api_get(f"/struts/{int(strut_id)}/stations").get("items", []))
+    return pd.DataFrame(api_get(f"/struts/{strut_id}/stations").get("items", []))
 
 
-def find_column(frame: pd.DataFrame, aliases: list[str]) -> str | None:
-    normalized = {"".join(c for c in str(col).lower() if c.isalnum()): col for col in frame.columns}
-    for alias in aliases:
-        found = normalized.get("".join(c for c in alias.lower() if c.isalnum()))
-        if found is not None:
-            return found
-    return None
+def key(value: object) -> str:
+    return "".join(char for char in str(value).lower() if char.isalnum())
 
 
-def value(row: pd.Series, aliases: list[str], default: Any = "N/A") -> Any:
-    column = find_column(pd.DataFrame([row]), aliases)
-    result = row.get(column) if column else None
-    return default if result is None or pd.isna(result) or result == "" else result
+def column(frame: pd.DataFrame, aliases: list[str]) -> str | None:
+    columns = {key(name): name for name in frame.columns}
+    return next((columns[key(alias)] for alias in aliases if key(alias) in columns), None)
 
 
-def text_series(frame: pd.DataFrame, column: str, default: str) -> pd.Series:
-    return frame[column].fillna(default).astype(str) if column in frame else pd.Series(default, index=frame.index)
+def severity(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    scores = [name for name in ("missing_score", "broken_score", "thin_score", "inflated_score", "bend_score") if name in result]
+    if not scores:
+        result["severity"] = "Unscored"
+        return result
+    maximum = result[scores].apply(pd.to_numeric, errors="coerce").max(axis=1).fillna(0)
+    nonzero = maximum[maximum > 0]
+    low, medium = nonzero.quantile([0.33, 0.66]).tolist() if not nonzero.empty else (1, 2)
+    result["severity"] = np.select([maximum <= low, maximum <= medium], ["Low", "Medium"], default="High")
+    return result
 
 
-def add_severity(frame: pd.DataFrame) -> None:
-    names = [name for name in ("missing_score", "broken_score", "thin_score", "inflated_score", "bend_score") if name in frame]
-    if not names:
-        frame["severity"] = "Unscored"
-        return
-    scores = frame[names].apply(pd.to_numeric, errors="coerce").max(axis=1).fillna(0)
-    nonzero = scores[scores > 0]
-    q1, q2 = nonzero.quantile([0.33, 0.66]).tolist() if not nonzero.empty else (1, 2)
-    frame["severity"] = np.select([scores <= q1, scores <= q2], ["Low", "Medium"], default="High")
+def truthy(value: object) -> bool:
+    return str(value).strip().casefold() in {"true", "1", "yes", "required", "needs review", "needs_review"}
+
+
+def display(value: object, digits: int = 2, unit: str = "") -> str:
+    if value is None or pd.isna(value) or value == "":
+        return "N/A"
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return f"{float(number):,.{digits}f} {unit}".strip() if pd.notna(number) else str(value)
+
+
+def metric(label: str, value: str) -> None:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>', unsafe_allow_html=True)
 
 
 def publish_selection(strut_id: int) -> None:
-    strut_id = int(strut_id)
-    if st.session_state.get("last_published_strut_id") == strut_id:
-        return
-    api_post("/select_struts", {"strut_ids": [strut_id]})
-    st.session_state.last_published_strut_id = strut_id
+    if st.session_state.get("published_strut_id") != strut_id:
+        api_post("/select_struts", {"strut_ids": [strut_id]})
+        st.session_state.published_strut_id = strut_id
 
 
-def poll_selection() -> None:
+@st.cache_data(ttl=5, show_spinner=False)
+def viewer_status() -> tuple[bool, str]:
+    """Return cached viewer readiness so reruns do not hammer a starting server."""
     try:
-        active_id = api_get("/state").get("active_strut_id")
+        response = requests.get(VIEWER_URL, timeout=VIEWER_TIMEOUT)
+        response.raise_for_status()
+        return True, "connected"
+    except requests.Timeout:
+        return False, f"The viewer did not respond within {VIEWER_TIMEOUT:g} seconds. It may still be building the CT scene."
+    except requests.RequestException as exc:
+        return False, f"The viewer is not reachable yet: {exc}"
+
+
+def broker_selection() -> None:
+    try:
+        active = api_get("/state").get("active_strut_id")
     except requests.RequestException:
         return
-    if active_id is not None and int(active_id) != st.session_state.get("selected_strut_id"):
-        st.session_state.selected_strut_id = int(active_id)
-        st.session_state.last_published_strut_id = int(active_id)
+    if active is not None and int(active) != st.session_state.get("selected_strut_id"):
+        st.session_state.selected_strut_id = int(active)
+        st.session_state.published_strut_id = int(active)
         st.rerun()
 
 
 if hasattr(st, "fragment"):
     @st.fragment(run_every="1s")
-    def sync_selection():
-        poll_selection()
+    def sync_selection() -> None:
+        broker_selection()
 else:
-    def sync_selection():
-        st.caption("Upgrade Streamlit to enable automatic broker polling.")
+    def sync_selection() -> None:
+        st.caption("Upgrade Streamlit to enable automatic selection synchronization.")
 
-sync_selection()
-st.title("Lattice Structure NDE Dashboard")
-st.caption(f"FastAPI broker: {API_URL}")
 
-try:
-    summary = load_struts().copy()
-except (requests.RequestException, ValueError) as exc:
-    st.error(f"Could not load dashboard data from FastAPI at {API_URL}: {exc}")
-    st.info("Start FastAPI with: uvicorn part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi:app --host 127.0.0.1 --port 8000")
-    st.stop()
+def overview(summary: pd.DataFrame) -> None:
+    st.title("Overview")
+    st.caption("High-level view of the defect-inspection workspace.")
+    counts = st.columns(3)
+    counts[0].metric("Struts", f"{len(summary):,}")
+    counts[1].metric("Need review", f"{sum(summary.needs_review.map(truthy)):,}")
+    counts[2].metric("Defect classes", f"{summary.primary_defect.nunique():,}")
+    st.info("Open Strut Analysis to filter the broker dataset, inspect station evidence, and use the linked 3-D views.")
 
-summary["primary_defect"] = text_series(summary, "primary_defect", "Unknown")
-summary["stage2_classification"] = text_series(summary, "stage2_classification", "Unknown")
-summary["needs_review"] = text_series(summary, "needs_review", "Not provided")
-add_severity(summary)
 
-st.sidebar.header("Inspection")
-search = st.sidebar.text_input("Search strut_id", placeholder="e.g. 1234")
-primary_values = sorted(summary["primary_defect"].unique())
-stage2_values = sorted(summary["stage2_classification"].unique())
-review_values = sorted(summary["needs_review"].unique())
-selected_primary = st.sidebar.multiselect("Primary defect", primary_values, default=primary_values)
-selected_stage2 = st.sidebar.multiselect("Stage 2 classification", stage2_values, default=stage2_values)
-selected_review = st.sidebar.multiselect("Needs review", review_values, default=review_values)
-unit_column = find_column(summary, ["unit_cell_ids", "unit_cell_id", "inventory_unit_cell_ids", "unit_cell"])
-unit_values = sorted(summary[unit_column].dropna().astype(str).unique()) if unit_column else []
-selected_units = st.sidebar.multiselect("Unit cell ID", unit_values, default=unit_values) if unit_values else []
-severity_values = sorted(summary["severity"].unique())
-selected_severity = st.sidebar.multiselect("Severity", severity_values, default=severity_values)
+def workflow() -> None:
+    st.title("Inspection Workflow")
+    steps = [
+        ("CAD + CT scan", "CAD supplies nominal geometry; CT supplies the measured lattice volume."),
+        ("Registration", "Aligns CAD and CT coordinates."),
+        ("Defect analysis", "Computes strut and station-level morphology metrics."),
+        ("Dashboard review", "Synchronizes human review, chat, and the 3-D PyVista views."),
+    ]
+    for number, (title, description) in enumerate(steps, 1):
+        st.markdown(f"<div class='flow-stage'><div class='flow-number'>{number:02d}</div><div class='flow-title'>{title}</div><div>{description}</div></div>", unsafe_allow_html=True)
 
-filtered = summary[
-    summary["primary_defect"].isin(selected_primary)
-    & summary["stage2_classification"].isin(selected_stage2)
-    & summary["needs_review"].isin(selected_review)
-    & summary["severity"].isin(selected_severity)
-].copy()
-if unit_column and selected_units:
-    filtered = filtered[filtered[unit_column].astype(str).isin(selected_units)]
-if search.strip():
-    filtered = filtered[filtered["strut_id"].astype(str).str.contains(search.strip(), regex=False)]
-if filtered.empty:
-    st.warning("No struts match the current filters.")
-    st.stop()
-filtered = filtered.sort_values("strut_id").reset_index(drop=True)
 
-st.subheader("Defect summary")
-st.caption("Select a row to publish that strut as the shared active selection.")
-table_event = st.dataframe(filtered.drop(columns=["severity"], errors="ignore"), width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key="broker_strut_summary")
-selected_rows = getattr(getattr(table_event, "selection", None), "rows", [])
-if selected_rows:
-    clicked_id = int(filtered.iloc[selected_rows[0]]["strut_id"])
-    st.session_state.selected_strut_id = clicked_id
+def trend(stations: pd.DataFrame, title: str, aliases: list[str], position: pd.Series, *, minimum: bool = False) -> None:
+    source = column(stations, aliases)
+    if source is None:
+        return
+    values = pd.to_numeric(stations[source], errors="coerce")
+    data = pd.DataFrame({"position": position, "value": values}).dropna()
+    if data.empty:
+        return
+    point = data.loc[data.value.idxmin() if minimum else data.value.idxmax()]
+    figure = go.Figure(go.Scatter(x=data.position, y=data.value, mode="lines+markers", line={"color": "#38bdf8"}))
+    figure.add_trace(go.Scatter(x=[point.position], y=[point.value], mode="markers", marker={"color": "#f97316", "size": 10}))
+    figure.update_layout(title=title, height=300, margin=dict(l=10, r=10, t=45, b=10), paper_bgcolor="#111827", plot_bgcolor="#111827", font_color="#e5e7eb")
+    st.plotly_chart(figure, use_container_width=True)
+
+
+def analysis(summary: pd.DataFrame) -> None:
+    st.title("Strut Analysis")
+    st.caption("This Streamlit page is the complete dashboard: numerical analysis, chat, and embedded PyVista macro/micro views stay synchronized.")
+    with st.sidebar:
+        st.header("Inspection")
+        search = st.text_input("Search strut ID", placeholder="e.g. 1234")
+        selected_primary = st.multiselect("Primary defect", sorted(summary.primary_defect.unique()), default=sorted(summary.primary_defect.unique()))
+        selected_stage2 = st.multiselect("Stage 2 classification", sorted(summary.stage2_classification.unique()), default=sorted(summary.stage2_classification.unique()))
+        selected_severity = st.multiselect("Severity", sorted(summary.severity.unique()), default=sorted(summary.severity.unique()))
+
+    filtered = summary[summary.primary_defect.isin(selected_primary) & summary.stage2_classification.isin(selected_stage2) & summary.severity.isin(selected_severity)].copy()
+    if search.strip():
+        filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
+    filtered = filtered.sort_values("strut_id").reset_index(drop=True)
+    if filtered.empty:
+        st.warning("No struts match the current filters.")
+        return
+
+    event = st.dataframe(filtered, hide_index=True, use_container_width=True, height=280, on_select="rerun", selection_mode="single-row", key="defect_queue")
+    rows = getattr(getattr(event, "selection", None), "rows", [])
+    available = filtered.strut_id.astype(int).tolist()
+    selected = int(st.session_state.get("selected_strut_id", available[0]))
+    if rows:
+        selected = int(filtered.iloc[rows[0]].strut_id)
+    if selected not in available:
+        selected = available[0]
+    st.session_state.selected_strut_id = selected
     try:
-        publish_selection(clicked_id)
+        publish_selection(selected)
     except requests.RequestException as exc:
         st.error(f"Could not publish selection to FastAPI: {exc}")
 
-all_ids = summary["strut_id"].astype(int).tolist()
-current = int(st.session_state.get("selected_strut_id", filtered.iloc[0]["strut_id"]))
-if current not in all_ids:
-    current = int(filtered.iloc[0]["strut_id"])
-options = filtered["strut_id"].astype(int).tolist()
-if current not in options:
-    options = [current] + options
-selected_id = st.sidebar.selectbox("Active strut", options, index=options.index(current))
-if int(selected_id) != st.session_state.get("selected_strut_id"):
-    st.session_state.selected_strut_id = int(selected_id)
+    selected_row = summary[summary.strut_id == selected].iloc[0]
+    st.subheader(f"Selected strut {selected}")
+    cards = st.columns(5)
+    for container, label, aliases in zip(cards, ["Primary defect", "Stage 2", "Needs review", "Occupancy", "Max deviation"], [SUMMARY["primary_defect"], SUMMARY["stage2_classification"], SUMMARY["needs_review"], SUMMARY["occupancy"], SUMMARY["deviation"]]):
+        source = column(summary, aliases)
+        with container:
+            metric(label, display(selected_row[source]) if source else "N/A")
+
+    st.subheader("Linked 3-D inspection")
+    st.caption("The PyVista renderer is embedded below; keep this Streamlit page open for the numerical analysis and chat.")
+    viewer_ready, viewer_message = viewer_status()
+    if viewer_ready:
+        components.iframe(VIEWER_URL, height=720, scrolling=False)
+    else:
+        st.warning(f"The PyVista viewer is not ready at {VIEWER_URL}: {viewer_message} Numeric analysis and chat remain available.")
+
     try:
-        publish_selection(int(selected_id))
+        stations = load_stations(selected)
     except requests.RequestException as exc:
-        st.error(f"Could not publish selection to FastAPI: {exc}")
-selected_id = int(st.session_state.selected_strut_id)
-selected_summary = summary[summary["strut_id"] == selected_id].iloc[0]
+        st.error(f"Could not load station records: {exc}")
+        return
+    position_source = column(stations, STATION["position"])
+    if position_source:
+        position = pd.to_numeric(stations[position_source], errors="coerce")
+        position = position * 100 if position.dropna().max() <= 1 else position
+        charts = st.columns(3)
+        with charts[0]:
+            trend(stations, "Material occupancy", STATION["occupancy"], position, minimum=True)
+        with charts[1]:
+            trend(stations, "Measured diameter", STATION["diameter"], position, minimum=True)
+        with charts[2]:
+            trend(stations, "Centerline offset", STATION["offset"], position)
 
-st.subheader(f"Selected strut: {selected_id}")
-st.markdown(f"**Defect badge:** `{value(selected_summary, ['primary_defect'])}`")
-left, middle, right = st.columns(3)
-with left:
-    st.write({label: value(selected_summary, aliases) for label, aliases in (
-        ("primary_defect", ["primary_defect"]), ("secondary_defects", ["secondary_defects", "secondary_defect"]),
-        ("stage2_classification", ["stage2_classification", "classification"]), ("confidence", ["confidence", "confidence_score"]),
-        ("needs_review", ["needs_review", "review_required"]),)})
-with middle:
-    st.write({name: value(selected_summary, [name]) for name in ("missing_score", "broken_score", "thin_score", "inflated_score", "bend_score")})
-with right:
-    st.write({label: value(selected_summary, aliases) for label, aliases in (
-        ("sampled_occupancy", ["sampled_occupancy", "occupancy"]), ("sampled_mean_intensity", ["sampled_mean_intensity", "mean_intensity"]),
-        ("cross-section radius", ["median_cross_section_radius_um", "equivalent_radius_um"]), ("max_centerline_offset_um", ["max_centerline_offset_um", "centerline_offset_um"]),
-        ("rms_centerline_offset_um", ["rms_centerline_offset_um", "centerline_offset_um"]), ("bend_curvature_um", ["bend_curvature_um", "curvature_um"]),)})
+    with st.expander("View technical/raw data"):
+        st.json(selected_row.to_dict())
+        st.dataframe(stations, hide_index=True, use_container_width=True)
+    chat(selected)
 
-st.subheader("Station-level defect analysis")
-try:
-    stations = load_stations(selected_id)
-except requests.RequestException as exc:
-    stations = pd.DataFrame()
-    st.error(f"Could not load station data for strut {selected_id}: {exc}")
-position_column = find_column(stations, ["position_fraction", "station_fraction", "position"])
-if stations.empty or position_column is None:
-    st.warning("No station rows with position_fraction were found for the active strut.")
-else:
-    stations["__position_fraction"] = pd.to_numeric(stations[position_column], errors="coerce")
-    stations = stations.dropna(subset=["__position_fraction"]).sort_values("__position_fraction")
-    x = stations["__position_fraction"]
-    charts = st.columns(2)
 
-    def series(aliases: list[str]):
-        column = find_column(stations, aliases)
-        return column, pd.to_numeric(stations[column], errors="coerce") if column else None
-
-    offset_col, offsets = series(["centroid_offset_um", "centroid_offset", "centerline_offset_um"])
-    occupancy_col, occupancies = series(["material_occupancy", "occupancy", "material_fraction"])
-    radius_col, radii = series(["equivalent_radius_um", "equivalent_radius", "radius_um"])
-    intensity_col, intensities = series(["mean_intensity", "sampled_mean_intensity"])
-    with charts[0]:
-        if offset_col:
-            fig = go.Figure(go.Scatter(x=x, y=offsets, mode="lines+markers", name=offset_col))
-            valid = offsets.dropna()
-            if not valid.empty:
-                index = valid.idxmax()
-                fig.add_trace(go.Scatter(x=[x.loc[index]], y=[offsets.loc[index]], mode="markers+text", text=["maximum offset"], textposition="top center", marker={"color": "red", "size": 11}))
-            fig.update_layout(title="Centroid offset vs position_fraction", xaxis_title="position_fraction", yaxis_title=offset_col)
-            st.plotly_chart(fig, width="stretch")
-        if occupancy_col:
-            fig = go.Figure(go.Scatter(x=x, y=occupancies, mode="lines+markers", name=occupancy_col))
-            low = occupancies < 0.5
-            if low.any():
-                fig.add_trace(go.Scatter(x=x[low], y=occupancies[low], mode="markers", marker={"color": "red", "size": 9}, name="Low occupancy"))
-            fig.update_layout(title="Material occupancy vs position_fraction", xaxis_title="position_fraction", yaxis_title=occupancy_col)
-            st.plotly_chart(fig, width="stretch")
-    with charts[1]:
-        if radius_col:
-            fig = go.Figure(go.Scatter(x=x, y=radii, mode="lines+markers", name=radius_col))
-            fig.update_layout(title="Equivalent radius vs position_fraction", xaxis_title="position_fraction", yaxis_title=radius_col)
-            st.plotly_chart(fig, width="stretch")
-        if intensity_col:
-            fig = go.Figure(go.Scatter(x=x, y=intensities, mode="lines+markers", name=intensity_col))
-            fig.update_layout(title="Mean intensity vs position_fraction", xaxis_title="position_fraction", yaxis_title=intensity_col)
-            st.plotly_chart(fig, width="stretch")
-
-with st.expander("Selected station rows"):
-    st.dataframe(stations.drop(columns=["__position_fraction"], errors="ignore"), width="stretch", hide_index=True)
-
-st.subheader("Chat")
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = []
-for message in st.session_state.chat_messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-question = st.chat_input("Ask about the active strut or defect summary")
-if question:
+def chat(selected_id: int) -> None:
+    st.subheader("Chat")
+    st.caption(f"Questions use the active broker selection: strut {selected_id}.")
+    for message in st.session_state.setdefault("chat_messages", []):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    question = st.chat_input("Ask about the selected strut, review queue, or defect summary")
+    if not question:
+        return
     st.session_state.chat_messages.append({"role": "user", "content": question})
     try:
         response = api_post("/chat", {"message": question, "active_strut_id": selected_id})
         st.session_state.chat_messages.append({"role": "assistant", "content": response.get("reply", "FastAPI returned no reply.")})
-        st.rerun()
     except requests.RequestException as exc:
-        st.session_state.chat_messages.append({"role": "assistant", "content": f"FastAPI chat is unavailable: {exc}"})
-        st.rerun()
+        st.session_state.chat_messages.append({"role": "assistant", "content": f"Chat is unavailable: {exc}"})
+    st.rerun()
+
+
+st.markdown("""
+<style>
+.stApp{background:#0b1120}.metric-card,.flow-stage{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.metric-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.flow-stage{margin:10px 0;color:#cbd5e1}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin:4px 0}
+</style>
+""", unsafe_allow_html=True)
+
+sync_selection()
+try:
+    summary = severity(load_summary())
+except (requests.RequestException, ValueError) as exc:
+    st.error(f"Could not load dashboard data from FastAPI at {API_URL}: {exc}")
+    st.info("Start FastAPI with: uvicorn part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi:app --host 127.0.0.1 --port 8000")
+    st.stop()
+for name, default in (("primary_defect", "Unknown"), ("stage2_classification", "Unknown"), ("needs_review", "Not provided")):
+    if name not in summary:
+        summary[name] = default
+    summary[name] = summary[name].fillna(default).astype(str)
+
+with st.sidebar:
+    st.caption("Navigation")
+    page = st.radio("Page", ["Overview", "Inspection Workflow", "Strut Analysis"], label_visibility="collapsed")
+if page == "Overview":
+    overview(summary)
+elif page == "Inspection Workflow":
+    workflow()
+else:
+    analysis(summary)
