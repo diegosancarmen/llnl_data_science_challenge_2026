@@ -10,8 +10,14 @@ from __future__ import annotations
 import os
 import re
 import logging
+import asyncio
+from time import monotonic
+import json
+import tempfile
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 import pandas as pd
@@ -25,6 +31,7 @@ DEFAULT_CENTERLINES = REPO_ROOT / "part2/napari_visualizer/napari_centerlines.cs
 DEFAULT_EXPORT = REPO_ROOT / "part2/stage_3_defect_analysis/output/station_export_20260727T193004Z"
 DEFAULT_DEFECT_BY_STRUT = DEFAULT_EXPORT / "defect_analysis_by_strut.csv"
 DEFAULT_DEFECT_BY_STATION = DEFAULT_EXPORT / "defect_analysis_by_station.csv"
+DEFAULT_REVIEW_DECISIONS = REPO_ROOT / "part2/stage_4_interactive_dashboard_napari_chatbot/output/review_decisions.json"
 logger = logging.getLogger(__name__)
 
 
@@ -93,6 +100,14 @@ class DataStore:
         # geometry. Serialize this once at startup rather than rebuilding
         # 18k records for every dashboard request.
         self.dashboard_summary = self.defect_by_strut.drop(columns="_strut_key").copy()
+        length_column = next(
+            (column for column in ("inventory_length_um", "length_um_from_centerline", "length_um") if column in self.centerlines),
+            None,
+        )
+        if length_column is not None:
+            self.dashboard_summary["length_um"] = self.dashboard_summary["strut_id"].astype(str).map(
+                self.centerline_by_key[length_column]
+            )
         self.dashboard_records = _records(self.dashboard_summary)
 
     @staticmethod
@@ -203,11 +218,62 @@ class GlobalState(BaseModel):
 
 class SelectionRequest(BaseModel):
     strut_ids: List[int] = Field(min_length=1)
+    active_strut_id: Optional[int] = None
+
+
+class ActiveStrutRequest(BaseModel):
+    strut_id: int
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: Literal["nominal", "needs_review", "confirmed_defect"]
+
+
+class ReviewDecisionStore:
+    """Persist final human decisions independently of automated analysis outputs."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._decisions = self._load()
+
+    def _load(self) -> dict[str, dict[str, str]]:
+        if not self.path.is_file():
+            return {}
+        with self.path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("schema_version") != 1 or not isinstance(payload.get("decisions"), dict):
+            raise ValueError(f"Invalid review decisions file: {self.path}")
+        return payload["decisions"]
+
+    def items(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {"strut_id": int(strut_id), **record}
+                for strut_id, record in sorted(self._decisions.items(), key=lambda item: int(item[0]))
+            ]
+
+    def set(self, strut_id: int, decision: str) -> dict[str, Any]:
+        record = {"decision": decision, "updated_utc": datetime.now(timezone.utc).isoformat()}
+        with self._lock:
+            self._decisions[str(strut_id)] = record
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"schema_version": 1, "decisions": self._decisions}
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp", delete=False
+            ) as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                temp_path = Path(handle.name)
+            temp_path.replace(self.path)
+        return {"strut_id": strut_id, **record}
 
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     active_strut_id: Optional[int] = None
+    chat_history: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
+    use_gemini: bool = False
 
 
 class ConnectionManager:
@@ -253,8 +319,10 @@ app.add_middleware(
 )
 
 store = load_store()
+review_decisions = ReviewDecisionStore(_env_path("DASHBOARD_REVIEW_DECISIONS_JSON", DEFAULT_REVIEW_DECISIONS))
 current_state = GlobalState()
 manager = ConnectionManager()
+_gemini_cache: Dict[str, tuple[float, str, List[int] | None]] = {}
 
 
 @app.get("/")
@@ -291,6 +359,18 @@ def get_state():
 def dashboard_struts():
     """Return the lightweight, complete defect table used by Streamlit."""
     return {"count": len(store.dashboard_records), "items": store.dashboard_records}
+
+
+@app.get("/reviews")
+def get_reviews():
+    items = review_decisions.items()
+    return {"count": len(items), "items": items}
+
+
+@app.post("/reviews/{strut_id}")
+def set_review(strut_id: int, request: ReviewDecisionRequest):
+    store.require_key(strut_id)
+    return review_decisions.set(strut_id, request.decision)
 
 
 @app.get("/struts")
@@ -345,14 +425,44 @@ def get_stations(strut_id: int):
     return {"strut_id": strut_id, "count": len(frame), "items": _records(frame)}
 
 
-async def publish_selection(strut_ids: List[int]) -> Dict[str, Any]:
+async def publish_selection(
+    strut_ids: List[int], active_strut_id: Optional[int] = None
+) -> Dict[str, Any]:
     if not strut_ids:
         raise HTTPException(status_code=422, detail="At least one strut_id is required")
-    for strut_id in strut_ids:
+    selected_ids = list(dict.fromkeys(strut_ids))
+    for strut_id in selected_ids:
         store.require_key(strut_id)
-    current_state.active_strut_ids = list(dict.fromkeys(strut_ids))
-    current_state.active_strut_id = current_state.active_strut_ids[0]
-    event = {"event_type": "STRUTS_SELECTED", "data": {"strut_ids": current_state.active_strut_ids}}
+    active_id = selected_ids[0] if active_strut_id is None else active_strut_id
+    if active_id not in selected_ids:
+        raise HTTPException(status_code=422, detail="active_strut_id must be one of strut_ids")
+
+    current_state.active_strut_ids = selected_ids
+    current_state.active_strut_id = active_id
+    event = {
+        "event_type": "STRUTS_SELECTED",
+        "data": {
+            "strut_ids": current_state.active_strut_ids,
+            "active_strut_id": current_state.active_strut_id,
+        },
+    }
+    await manager.broadcast(event)
+    return {"status": "success", **event["data"]}
+
+
+async def publish_active_strut(strut_id: int) -> Dict[str, Any]:
+    store.require_key(strut_id)
+    if strut_id not in current_state.active_strut_ids:
+        raise HTTPException(status_code=422, detail="strut_id must be one of the selected strut IDs")
+
+    current_state.active_strut_id = strut_id
+    event = {
+        "event_type": "STRUT_ACTIVE_CHANGED",
+        "data": {
+            "strut_id": current_state.active_strut_id,
+            "strut_ids": current_state.active_strut_ids,
+        },
+    }
     await manager.broadcast(event)
     return {"status": "success", **event["data"]}
 
@@ -364,17 +474,141 @@ async def select_strut(strut_id: int):
 
 @app.post("/select_struts")
 async def select_struts(request: SelectionRequest):
-    return await publish_selection(request.strut_ids)
+    return await publish_selection(request.strut_ids, request.active_strut_id)
+
+
+@app.post("/select_active_strut")
+async def select_active_strut(request: ActiveStrutRequest):
+    return await publish_active_strut(request.strut_id)
+
+
+def _chat_filter(
+    primary_defect: Optional[str] = None,
+    stage2_classification: Optional[str] = None,
+    needs_review: Optional[bool] = None,
+    strut_ids: Optional[List[int]] = None,
+) -> pd.DataFrame:
+    """Return a safely filtered defect table for Gemini's read-only tools."""
+    frame = store.defect_by_strut
+    if primary_defect:
+        frame = frame[frame["primary_defect"].astype(str).str.casefold() == primary_defect.casefold()]
+    if stage2_classification:
+        frame = frame[frame["stage2_classification"].astype(str).str.casefold() == stage2_classification.casefold()]
+    if needs_review is not None:
+        flags = frame["needs_review"].astype(str).str.casefold().isin({"true", "1", "yes"})
+        frame = frame[flags == needs_review]
+    if strut_ids is not None:
+        wanted = {int(value) for value in strut_ids}
+        frame = frame[frame["strut_id"].astype(int).isin(wanted)]
+    return frame
+
+
+def _gemini_chat_call(question: str, active_strut_id: Optional[int], chat_history: List[Dict[str, str]]) -> tuple[str, List[int] | None]:
+    """Run Gemini with fixed CSV-analysis and selection tools only."""
+    from google import genai
+    from google.genai import types
+
+    selected_ids: List[int] | None = None
+
+    def count_struts(
+        primary_defect: str | None = None,
+        stage2_classification: str | None = None,
+        needs_review: bool | None = None,
+    ) -> Dict[str, Any]:
+        """Count struts matching optional primary defect, classification, or review filters."""
+        frame = _chat_filter(primary_defect, stage2_classification, needs_review)
+        return {"count": int(len(frame))}
+
+    def aggregate_struts(
+        metric: Literal["median_cross_section_radius_um", "max_centerline_offset_um", "rms_centerline_offset_um", "sampled_occupancy"],
+        aggregation: Literal["mean", "min", "max"],
+        group_by: Literal["primary_defect", "stage2_classification"] | None = None,
+        primary_defect: str | None = None,
+        stage2_classification: str | None = None,
+    ) -> Dict[str, Any]:
+        """Compute an allowed aggregate over the defect-by-strut CSV, optionally grouped by a category."""
+        frame = _chat_filter(primary_defect, stage2_classification)
+        values = pd.to_numeric(frame[metric], errors="coerce")
+        if group_by:
+            grouped = frame.assign(__value=values).groupby(group_by, dropna=False)["__value"].agg(aggregation)
+            return {"metric": metric, "aggregation": aggregation, "groups": _json_value(grouped.dropna().to_dict())}
+        return {"metric": metric, "aggregation": aggregation, "value": _json_value(getattr(values, aggregation)())}
+
+    def get_strut_detail(strut_id: int) -> Dict[str, Any]:
+        """Get compact defect summary and station records for one strut ID."""
+        return store.strut_detail(strut_id)
+
+    def select_struts(
+        primary_defect: str | None = None,
+        stage2_classification: str | None = None,
+        needs_review: bool | None = None,
+    ) -> Dict[str, Any]:
+        """Select every strut matching the requested filters in the dashboard and visualizer."""
+        nonlocal selected_ids
+        frame = _chat_filter(primary_defect, stage2_classification, needs_review)
+        selected_ids = frame["strut_id"].astype(int).tolist()
+        return {"selected_count": len(selected_ids), "preview_strut_ids": selected_ids[:20], "active_strut_id": selected_ids[0] if selected_ids else None}
+
+    def select_strut_ids(strut_ids: List[int]) -> Dict[str, Any]:
+        """Select explicitly named strut IDs after validating them against the loaded dataset."""
+        nonlocal selected_ids
+        selected_ids = [int(value) for value in strut_ids if str(int(value)) in store.strut_keys]
+        return {"selected_count": len(selected_ids), "preview_strut_ids": selected_ids[:20], "active_strut_id": selected_ids[0] if selected_ids else None}
+
+    selected_context: Dict[str, Any] = {}
+    if active_strut_id is not None and str(active_strut_id) in store.strut_keys:
+        selected_context = store.strut_detail(active_strut_id)
+    prompt = (
+        "You are a lattice defect-inspection assistant. Use tools for CSV-derived facts and selections. "
+        "Never claim a calculation you did not obtain from a tool. Requests to identify, list, show, find, or ask "
+        "which struts match a category are selection requests: call select_struts or select_strut_ids and state "
+        "the exact selected count. You cannot save final reviews.\n\n"
+        f"Active inspection context: {json.dumps(selected_context, default=str)[:16000]}\n"
+        f"Recent conversation: {json.dumps(chat_history[-12:], default=str)}\n"
+        f"User question: {question}"
+    )
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    response = client.models.generate_content(
+        model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        contents=prompt,
+        config=types.GenerateContentConfig(tools=[count_struts, aggregate_struts, get_strut_detail, select_struts, select_strut_ids]),
+    )
+    return response.text or "Gemini returned an empty response.", selected_ids
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """HTTP chat endpoint for clients that do not maintain a WebSocket."""
-    result = _chat_response(request.message, request.active_strut_id)
+    deterministic = _chat_response(request.message, request.active_strut_id)
+    if any(key in deterministic for key in ("count", "total", "strut_ids", "select_strut_ids", "strut")):
+        result = deterministic
+    elif request.use_gemini and os.getenv("GEMINI_ENABLED", "false").casefold() in {"1", "true", "yes"} and os.getenv("GEMINI_API_KEY"):
+        try:
+            cache_key = json.dumps([request.message.casefold().strip(), request.active_strut_id, request.chat_history[-4:]], sort_keys=True)
+            cached = _gemini_cache.get(cache_key)
+            if cached and monotonic() - cached[0] < 300:
+                _, reply, selected_ids = cached
+            else:
+                reply, selected_ids = await asyncio.to_thread(
+                    _gemini_chat_call, request.message, request.active_strut_id, request.chat_history[-4:]
+                )
+                _gemini_cache[cache_key] = (monotonic(), reply, selected_ids)
+            result = {"reply": reply, "select_strut_ids": selected_ids, "references": []}
+        except Exception as exc:
+            logger.exception("Gemini chat failed; using deterministic fallback")
+            result = _chat_response(request.message, request.active_strut_id)
+            result["reply"] = f"Gemini was unavailable ({exc}); {result['reply']}"
+    else:
+        result = deterministic
     selected_ids = result.pop("select_strut_ids", None)
+    selection = None
     if selected_ids:
-        await publish_selection(selected_ids)
-    return {"message_id": str(uuid4()), **result}
+        # Return the broker state as well as broadcasting it.  The Streamlit
+        # client reruns after a chat message; without this acknowledgement it
+        # can republish its stale, single selected ID and erase a chat-driven
+        # multi-selection before the visualizer receives it.
+        selection = await publish_selection(selected_ids)
+    return {"message_id": str(uuid4()), **result, "selection": selection}
 
 
 def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[str, Any]:
@@ -434,13 +668,27 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             "references": [f"/struts/{requested_strut_id}/stations"],
         }
 
+    list_intent = any(token in lower for token in ("which", "what", "list", "show", "find"))
+    all_struts_request = bool(re.search(r"\ball\s+(?:the\s+)?struts?\b", lower))
+    direct_selection_intent = any(
+        token in lower for token in ("select", "highlight", "visualize")
+    )
+    collection_intent = list_intent or all_struts_request or direct_selection_intent
+
     if "review" in lower:
         review_values = store.defect_by_strut["needs_review"].astype(str).str.casefold().isin({"true", "1", "yes"})
         frame = store.defect_by_strut[review_values]
         ids_for_review = [int(value) for value in frame["strut_id"].tolist()]
+        selecting = collection_intent and not any(
+            phrase in lower for phrase in ("how many", "count", "summary")
+        )
         return {
-            "reply": f"{len(ids_for_review)} struts are marked as needing review.",
-            "strut_ids": ids_for_review[:100],
+            "reply": (
+                f"{len(ids_for_review)} struts are marked as needing review. "
+                + (f"Selected all {len(ids_for_review)}." if selecting else "")
+            ),
+            "select_strut_ids": ids_for_review if selecting else None,
+            "strut_ids": ids_for_review if selecting else ids_for_review[:100],
             "total": len(ids_for_review),
             "references": ["/struts?needs_review=true"],
         }
@@ -477,7 +725,6 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             else ("primary_defect", requested_defect)
         )
 
-    list_intent = any(token in lower for token in ("which", "list", "show", "find"))
     missing_word = bool(re.search(r"\bmissing\b", re.sub(r"[_-]", " ", lower)))
     if missing_word and not category_value:
         missing_counts = {
@@ -497,19 +744,19 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             ],
         }
 
-    if category_value and list_intent:
+    if category_value and collection_intent:
         frame = store.defect_by_strut[
             store.defect_by_strut[category_field].astype(str).str.casefold() == category_value.casefold()
         ]
         strut_ids = [int(value) for value in frame["strut_id"].tolist()]
         label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
-        shown_ids = strut_ids[:100]
         return {
             "reply": (
                 f"There are {len(strut_ids)} struts with {label} {category_value}. "
-                f"Showing the first {len(shown_ids)}: {', '.join(map(str, shown_ids))}."
+                + f"Selected all {len(strut_ids)} matching struts."
             ),
-            "strut_ids": shown_ids,
+            "select_strut_ids": strut_ids,
+            "strut_ids": strut_ids,
             "total": len(strut_ids),
             "field": category_field,
             "value": category_value,
@@ -518,10 +765,14 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
 
     if requested_defect and ("how many" in lower or "count" in lower or "summary" in lower):
         count = int((store.defect_by_strut["primary_defect"].astype(str) == requested_defect).sum())
+        selected_ids = store.defect_by_strut.loc[
+            store.defect_by_strut["primary_defect"].astype(str) == requested_defect, "strut_id"
+        ].astype(int).tolist() if "select" in lower else None
         return {
-            "reply": f"There are {count} struts with primary defect {requested_defect}.",
+            "reply": f"There are {count} struts with primary defect {requested_defect}." + (f" Selected all {count}." if selected_ids else ""),
             "defect": requested_defect,
             "count": count,
+            "select_strut_ids": selected_ids,
             "references": [f"/struts?primary_defect={requested_defect}"],
         }
 
@@ -574,7 +825,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                 elif event_type in {"STRUT_SELECTED", "STRUTS_SELECTED"}:
                     requested = data.get("strut_ids", [data.get("strut_id")])
-                    await publish_selection([int(value) for value in requested if value is not None])
+                    active = data.get("active_strut_id")
+                    await publish_selection(
+                        [int(value) for value in requested if value is not None],
+                        int(active) if active is not None else None,
+                    )
+                elif event_type in {"STRUT_ACTIVE_CHANGED", "ACTIVE_STRUT_CHANGED"}:
+                    await publish_active_strut(int(data.get("strut_id")))
                 else:
                     raise ValueError(f"Unknown event type: {event_type or '(empty)'}")
             except WebSocketDisconnect:

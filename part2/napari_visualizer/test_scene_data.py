@@ -8,12 +8,18 @@ from part2.napari_visualizer.scene_data import (
     image_grid,
     make_line_mesh,
     parse_strut_ids,
+    placeholder_line_mesh,
     unit_cell_context_color,
 )
 
 
 def test_parse_strut_ids_preserves_first_occurrence_order():
     assert parse_strut_ids("12, 7 12 8") == ["12", "7", "8"]
+
+
+def test_parse_strut_ids_handles_empty_input_for_web_selection():
+    assert parse_strut_ids("") == []
+    assert parse_strut_ids("   ,  ") == []
 
 
 def test_classification_colors_match_existing_visualizer_contract():
@@ -34,6 +40,14 @@ def test_line_mesh_has_one_line_cell_per_strut_and_retains_colors():
     assert mesh.n_points == 4
     assert mesh.cell_data["rgba"].shape == (2, 4)
     assert mesh.points[0].tolist() == [3.0, 2.0, 1.0]
+
+
+def test_placeholder_line_mesh_is_non_empty_and_can_carry_rgba_colors():
+    mesh = placeholder_line_mesh("gray")
+    assert mesh.n_cells == 1
+    assert mesh.n_points == 2
+    assert np.isfinite(mesh.points).all()
+    assert mesh.cell_data["rgba"].shape == (1, 4)
 
 
 def test_image_grid_preserves_zyx_origin_and_xyz_dimensions():

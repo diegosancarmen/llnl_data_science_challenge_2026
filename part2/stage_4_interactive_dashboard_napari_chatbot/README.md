@@ -40,6 +40,17 @@ uvicorn part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi:app --hos
 The broker provides the REST and WebSocket endpoints used by the viewer and
 dashboard. Leave this window running.
 
+Final dashboard review decisions are persisted by the broker in
+`part2/stage_4_interactive_dashboard_napari_chatbot/output/review_decisions.json`.
+Set `DASHBOARD_REVIEW_DECISIONS_JSON` before starting FastAPI to use a different
+shared location.
+
+To enable Gemini-powered open-ended questions, set both `GEMINI_ENABLED=true`
+and `GEMINI_API_KEY` before starting FastAPI. `GEMINI_MODEL` optionally
+overrides the default `gemini-2.5-flash` model. Basic CSV count/filter/select
+questions stay local and do not consume Gemini quota; the dashboard toggle is
+off by default. The chat assistant cannot save final review choices.
+
 ## 3. Start the browser PyVista viewer
 
 Open another PowerShell window, activate the environment, change to the

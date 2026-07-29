@@ -1,9 +1,9 @@
-"""Standalone entry point for the uploaded defect-analysis dashboard.
+"""Standalone entry point for the synchronized defect-analysis dashboard.
 
 The existing ``app.py`` entry point remains unchanged. This entry point reuses
 the current defect-metrics implementation, including CSV upload persistence,
-filters, row selection, station plots, and chat context, without restoring the
-visible 3-D viewer.
+filters, row selection, station plots, chat context, and active-strut broker
+synchronization without restoring the visible 3-D viewer.
 """
 
 from pathlib import Path

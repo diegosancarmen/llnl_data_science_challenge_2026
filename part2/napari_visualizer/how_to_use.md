@@ -40,6 +40,9 @@ You need two files to run the visualizer:
 
 Execute `visualize_struts.py` from your Windows terminal (PowerShell or Command Prompt).
 
+The browser visualizer is started separately with `web_visualizer.py`; it exposes
+the same selection behavior through the Full Lattice toolbar.
+
 **Important Note on WSL Paths:**
 If your data resides in a WSL (Windows Subsystem for Linux) directory, but you are running this native Windows Python environment, you must pass the network path using the `\\wsl.localhost` prefix.
 
@@ -61,6 +64,11 @@ python visualize_struts.py `
 * **Inspect a Selected Strut:** Use the `Selected Strut` dropdown in the individual-strut window to switch among the applied IDs.
 * **Clear Selection:** Click `Clear` in the Full Lattice window to remove all yellow highlights.
 * **Show or Hide Layers:** Use the `Visible layers` checkboxes in the Macro window for CT, all centerlines, and selected centerlines; use those in the Micro window for CT, unit-cell centerlines, and the selected centerline.
+
+For the browser visualizer, applying several IDs highlights every submitted
+centerline, focuses the Full Lattice camera on the first ID, and fills the
+Selected Unit Cell dropdown with the submitted IDs. Changing that dropdown
+switches the unit-cell crop while preserving the full-lattice multi-selection.
 
 Use `--macro-downsample` (default `2`) to reduce Macro CT memory further, and `--micro-downsample` (default `1`) to control the selected unit-cell volume resolution. Rotate and zoom the maximum-intensity-projection CT volumes to inspect material around the colored centerlines.
 

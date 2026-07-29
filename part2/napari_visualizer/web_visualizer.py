@@ -7,8 +7,10 @@ the broker continues to exchange only small metadata and selection messages.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -25,6 +27,8 @@ from part2.napari_visualizer.scene_data import (
     classification_color,
     image_grid,
     make_line_mesh,
+    parse_strut_ids,
+    placeholder_line_mesh,
     unit_cell_context_color,
 )
 
@@ -70,10 +74,15 @@ class WebStrutVisualizer:
         self.all_lines.cell_data["strut_index"] = np.arange(len(self.strut_ids), dtype=np.int64)
         self.unit_cell_to_indices = self._unit_cell_indices()
         self.selected_id = self.strut_ids[0]
+        self.selected_ids = [self.selected_id]
+        self._selection_state_update = False
+        self._broker_selection_queue: queue.SimpleQueue[tuple[list[str], str | None]] = queue.SimpleQueue()
 
         self.server = self.get_server("strut-viewer", client_type="vue3")
         self.state = self.server.state
-        self.state.strut_options = [{"title": strut_id, "value": strut_id} for strut_id in self.strut_ids]
+        self.state.strut_ids_input = self.selected_id
+        self.state.selected_strut_options = [{"title": self.selected_id, "value": self.selected_id}]
+        self.state.selection_status = "1 strut selected"
         self.state.selected_strut_id = self.selected_id
         self.state.macro_ct_visible = True
         self.state.macro_lines_visible = True
@@ -90,6 +99,7 @@ class WebStrutVisualizer:
         print(f"[viewer] scenes ready (elapsed {time.perf_counter() - started_at:.1f}s)", flush=True)
         self._build_ui()
         self._observe_state()
+        self._register_broker_selection_consumer()
         self._start_broker_listener()
         print(f"[viewer] initialization complete (elapsed {time.perf_counter() - started_at:.1f}s)", flush=True)
 
@@ -132,7 +142,7 @@ class WebStrutVisualizer:
             self.all_lines, scalars="rgba", rgba=True, line_width=ALL_STRUT_WIDTH, pickable=True,
         )
         self.macro_selected_actor = self.macro_plotter.add_mesh(
-            make_line_mesh(np.empty((0, 2, 3))), color=SELECTED_STRUT_COLOR,
+            placeholder_line_mesh(), color=SELECTED_STRUT_COLOR,
             line_width=SELECTED_STRUT_WIDTH, pickable=False,
         )
         self.macro_plotter.add_text("Full lattice", font_size=12)
@@ -149,10 +159,11 @@ class WebStrutVisualizer:
 
         self.micro_plotter.set_background("#161616")
         self.micro_context_actor = self.micro_plotter.add_mesh(
-            make_line_mesh(np.empty((0, 2, 3))), color="gray", line_width=ALL_STRUT_WIDTH, pickable=False,
+            placeholder_line_mesh("gray"), scalars="rgba", rgba=True,
+            line_width=ALL_STRUT_WIDTH, pickable=False,
         )
         self.micro_selected_actor = self.micro_plotter.add_mesh(
-            make_line_mesh(np.empty((0, 2, 3))), color=SELECTED_STRUT_COLOR,
+            placeholder_line_mesh(), color=SELECTED_STRUT_COLOR,
             line_width=SELECTED_STRUT_WIDTH, pickable=False,
         )
         self.micro_plotter.add_text("Selected unit cell", font_size=12)
@@ -165,20 +176,26 @@ class WebStrutVisualizer:
         with self.SinglePageLayout(self.server, full_height=True) as layout:
             layout.theme = "dark"
             layout.title.set_text("Lattice PyVista Viewer")
-            with layout.toolbar:
-                self.vuetify3.VSelect(
-                    v_model=("selected_strut_id",), items=("strut_options",), label="Active strut",
-                    density="compact", style="max-width: 280px",
-                )
             with layout.content:
                 with self.vuetify3.VContainer(fluid=True, classes="fill-height pa-2"):
                     with self.vuetify3.VRow(dense=True, classes="fill-height"):
                         with self.vuetify3.VCol(cols=12, md=6,
                                                 style="height: 100%; display: flex; flex-direction: column;"):
-                            self.vuetify3.VCheckbox(v_model=("macro_ct_visible",), label="Full CT scan", density="compact", hide_details=True)
-                            self.vuetify3.VCheckbox(v_model=("macro_lines_visible",), label="All centerlines", density="compact", hide_details=True)
-                            self.vuetify3.VCheckbox(v_model=("macro_active_line_visible",), label="Selected centerline", 
-                            density="compact", hide_details=True)
+                            self.vuetify3.VTextField(
+                                v_model=("strut_ids_input",), label="Strut IDs",
+                                placeholder="Comma- or space-separated IDs", density="compact",
+                                hide_details=True,
+                            )
+                            with self.html.Div(classes="d-flex align-center mb-1"):
+                                self.vuetify3.VBtn("Apply", click=self._apply_input_selection, density="compact")
+                                self.vuetify3.VBtn("Clear", click=self._clear_selection, density="compact", classes="ml-2")
+                                self.html.Div("{{ selection_status }}", classes="ml-3 text-caption")
+
+                            with self.vuetify3.VContainer(classes="d-flex flex-row align-center ga-4 pa-0 mb-2"):
+                                self.vuetify3.VCheckbox(v_model=("macro_ct_visible",), label="Full CT scan", density="compact", hide_details=True)
+                                self.vuetify3.VCheckbox(v_model=("macro_lines_visible",), label="All centerlines", density="compact", hide_details=True)
+                                self.vuetify3.VCheckbox(v_model=("macro_active_line_visible",), label="Selected centerline",
+                                density="compact", hide_details=True)
 
                             with self.html.Div(style="flex: 1 1 auto; height: 100%; min-height: 0; position: relative;"):
                                 self.macro_view = self.vtk_widgets.VtkRemoteView(
@@ -196,11 +213,33 @@ class WebStrutVisualizer:
 
                         with self.vuetify3.VCol(cols=12, md=6,
                                                 style="height: 100%; display: flex; flex-direction: column;"):
-                            self.vuetify3.VCheckbox(v_model=("micro_ct_visible",), label="Unit-cell CT", density="compact", hide_details=True)
-                            self.vuetify3.VCheckbox(v_model=("micro_lines_visible",), label="Unit-cell centerlines", density="compact", hide_details=True)
-                            self.vuetify3.VCheckbox(v_model=("micro_active_line_visible",), label="Selected centerline", 
-                            density="compact", hide_details=True)
+                            self.vuetify3.VSelect(
+                                v_model=("selected_strut_id",), items=("selected_strut_options",),
+                                label="Selected strut", density="compact", hide_details=True,
+                            )
 
+                            # Empty div matching the height visually via padding
+                            self.html.Div(classes="py-3 mb-1")
+
+                            with self.vuetify3.VContainer(classes="d-flex flex-row align-center ga-4 pa-0 mb-2"):
+                                self.vuetify3.VCheckbox(
+                                    v_model=("micro_ct_visible",),
+                                    label="Unit-cell CT",
+                                    density="compact",
+                                    hide_details=True,
+                                )
+                                self.vuetify3.VCheckbox(
+                                    v_model=("micro_lines_visible",),
+                                    label="Unit-cell centerlines",
+                                    density="compact",
+                                    hide_details=True,
+                                )
+                                self.vuetify3.VCheckbox(
+                                    v_model=("micro_active_line_visible",),
+                                    label="Selected centerline",
+                                    density="compact",
+                                    hide_details=True,
+                                )
 
                             with self.html.Div(style="flex: 1 1 auto; height: 100%; min-height: 0; position: relative;"):
                                 self.micro_view = self.vtk_widgets.VtkRemoteView(
@@ -251,12 +290,19 @@ class WebStrutVisualizer:
     def _observe_state(self) -> None:
         @self.state.change("selected_strut_id")
         def selected_strut_changed(selected_strut_id: str, **_kwargs: Any) -> None:
-            if selected_strut_id in self.strut_index and selected_strut_id != self.selected_id:
-                self._update_selection(selected_strut_id, publish=True)
+            if (
+                not self._selection_state_update
+                and selected_strut_id in self.strut_index
+                and selected_strut_id in self.selected_ids
+                and selected_strut_id != self.selected_id
+            ):
+                self._update_selection(selected_strut_id, publish=False)
+                self._publish_active_strut(selected_strut_id)
 
         @self.state.change("macro_ct_visible", "macro_lines_visible", "macro_active_line_visible", "micro_ct_visible", "micro_lines_visible", "micro_active_line_visible")
         def visibility_changed(**_kwargs: Any) -> None:
             self._set_visibility()
+            self._render()
 
         MIN_ZOOM = 0.5
         MAX_ZOOM = 3.0
@@ -294,7 +340,54 @@ class WebStrutVisualizer:
         except (KeyError, IndexError, TypeError, ValueError):
             return
         if 0 <= index < len(self.strut_ids):
-            self.state.selected_strut_id = self.strut_ids[index]
+            self.state.strut_ids_input = self.strut_ids[index]
+            self._apply_input_selection(publish=True)
+
+    def _set_selection_status(self, message: str) -> None:
+        self.state.selection_status = message
+
+    def _apply_input_selection(self, *_args: Any, publish: bool = True, **_kwargs: Any) -> None:
+        requested = parse_strut_ids(self.state.strut_ids_input)
+        self._apply_ids(requested, publish=publish)
+
+    def _apply_ids(
+        self, requested: list[str], *, publish: bool, active_strut_id: str | None = None
+    ) -> None:
+        requested = list(dict.fromkeys(str(value) for value in requested))
+        unknown = [strut_id for strut_id in requested if strut_id not in self.strut_index]
+        if unknown:
+            self._set_selection_status("Unknown strut ID(s): " + ", ".join(unknown))
+            return
+        if not requested:
+            self._set_selection_status("Enter at least one strut ID")
+            return
+        active_id = requested[0] if active_strut_id is None else str(active_strut_id)
+        if active_id not in requested:
+            self._set_selection_status("Active strut must be one of the selected IDs")
+            return
+
+        self.selected_ids = requested
+        self._selection_state_update = True
+        try:
+            self.state.strut_ids_input = ", ".join(requested)
+            self.state.selected_strut_options = [
+                {"title": strut_id, "value": strut_id} for strut_id in requested
+            ]
+            self.state.selected_strut_id = active_id
+        finally:
+            self._selection_state_update = False
+        self._set_selection_status(f"{len(requested)} strut(s) selected")
+        self._update_selection(active_id, publish=publish)
+
+    def _clear_selection(self, *_args: Any, **_kwargs: Any) -> None:
+        self.selected_ids = []
+        self.state.strut_ids_input = ""
+        self.state.selected_strut_options = []
+        self.state.selected_strut_id = None
+        self._set_selection_status("No struts selected")
+        self.macro_all_actor.mapper.SetInputData(self.all_lines)
+        self._set_visibility()
+        self._render()
 
     def _context_for(self, index: int) -> tuple[list[int], str | None]:
         unit_cell = self.table.iloc[index]["inventory_unit_cell_ids"]
@@ -312,31 +405,42 @@ class WebStrutVisualizer:
             raise ValueError("Selected strut context crop does not intersect the scan")
         return lower, upper
 
-    def _replace_actor(self, plotter: pv.Plotter, actor: Any, mesh: pv.PolyData, **kwargs: Any) -> Any:
-        plotter.remove_actor(actor, render=False)
-        return plotter.add_mesh(mesh, **kwargs)
+    def _set_micro_volume(self, grid: pv.ImageData) -> None:
+        """Update the existing bounded CT actor without replacing it mid-render."""
+        if not getattr(self, "micro_ct_actors", []):
+            self.micro_ct_actors = self._add_volume(self.micro_plotter, grid)
+            return
+        for actor in self.micro_ct_actors:
+            actor.mapper.SetInputData(grid)
+
+    def _publish_active_strut(self, strut_id: str) -> None:
+        try:
+            requests.post(
+                f"{self.api_url}/select_active_strut",
+                json={"strut_id": int(strut_id)},
+                timeout=3,
+            ).raise_for_status()
+        except requests.RequestException as exc:
+            print(f"Could not publish active strut: {exc}", flush=True)
 
     def _update_selection(self, strut_id: str, *, publish: bool) -> None:
         self.selected_id = strut_id
         index = self.strut_index[strut_id]
         colors = list(self.base_colors)
-        colors[index] = TRANSPARENT_RGBA
+        for selected_index in (self.strut_index[item] for item in self.selected_ids):
+            colors[selected_index] = TRANSPARENT_RGBA
         macro_lines = make_line_mesh(self.vectors_zyx, colors)
         macro_lines.cell_data["strut_index"] = np.arange(len(self.strut_ids), dtype=np.int64)
         self.macro_all_actor.mapper.SetInputData(macro_lines)
-        self.macro_selected_actor.mapper.SetInputData(make_line_mesh(self.vectors_zyx[index:index + 1]))
+        selected_indices = [self.strut_index[item] for item in self.selected_ids]
+        self.macro_selected_actor.mapper.SetInputData(make_line_mesh(self.vectors_zyx[selected_indices]))
 
         indices, _unit_cell = self._context_for(index)
         lower, upper = self._context_bounds(indices)
         crop = np.asarray(self.volume[lower[0]:upper[0], lower[1]:upper[1], lower[2]:upper[2]])
-        for actor in getattr(self, "micro_ct_actors", []):
-            self.micro_plotter.remove_actor(actor, render=False)
-        self.micro_ct_actors = self._add_volume(self.micro_plotter, image_grid(crop, self.args.micro_downsample, lower))
+        self._set_micro_volume(image_grid(crop, self.args.micro_downsample, lower))
         context_colors = [TRANSPARENT_RGBA if item == index else unit_cell_context_color(self.table.iloc[item]["inventory_classification"]) for item in indices]
-        self.micro_context_actor = self._replace_actor(
-            self.micro_plotter, self.micro_context_actor, make_line_mesh(self.vectors_zyx[indices], context_colors),
-            scalars="rgba", rgba=True, line_width=ALL_STRUT_WIDTH, pickable=False,
-        )
+        self.micro_context_actor.mapper.SetInputData(make_line_mesh(self.vectors_zyx[indices], context_colors))
         self.micro_selected_actor.mapper.SetInputData(make_line_mesh(self.vectors_zyx[index:index + 1]))
         self.micro_plotter.reset_camera()
         self.macro_plotter.reset_camera()
@@ -347,7 +451,14 @@ class WebStrutVisualizer:
         self._render()
         if publish:
             try:
-                requests.post(f"{self.api_url}/select_struts", json={"strut_ids": [int(strut_id)]}, timeout=3).raise_for_status()
+                requests.post(
+                    f"{self.api_url}/select_struts",
+                    json={
+                        "strut_ids": [int(item) for item in self.selected_ids],
+                        "active_strut_id": int(strut_id),
+                    },
+                    timeout=3,
+                ).raise_for_status()
             except requests.RequestException as exc:
                 print(f"Could not publish selected strut: {exc}", flush=True)
 
@@ -358,19 +469,17 @@ class WebStrutVisualizer:
         self.macro_all_actor.SetVisibility(self.state.macro_lines_visible)
         
         # Check if macro_active_line_visible exists in state; default to True if not set
-        macro_active = getattr(self.state, "macro_active_line_visible", True)
+        macro_active = getattr(self.state, "macro_active_line_visible", True) and bool(self.selected_ids)
         self.macro_selected_actor.SetVisibility(macro_active)
 
         # Micro pane visibility
         for actor in getattr(self, "micro_ct_actors", []):
-            actor.SetVisibility(self.state.micro_ct_visible)
-        self.micro_context_actor.SetVisibility(self.state.micro_lines_visible)
+            actor.SetVisibility(self.state.micro_ct_visible and bool(self.selected_ids))
+        self.micro_context_actor.SetVisibility(self.state.micro_lines_visible and bool(self.selected_ids))
         
         # Check if micro_active_line_visible exists in state; default to True if not set
-        micro_active = getattr(self.state, "micro_active_line_visible", True)
+        micro_active = getattr(self.state, "micro_active_line_visible", True) and bool(self.selected_ids)
         self.micro_selected_actor.SetVisibility(micro_active)
-
-        self._render()
 
     def _render(self) -> None:
         self.macro_plotter.render()
@@ -378,6 +487,13 @@ class WebStrutVisualizer:
         if hasattr(self, "macro_view"):
             self.macro_view.update()
             self.micro_view.update()
+
+    def _register_broker_selection_consumer(self) -> None:
+        @self.server.controller.add_task("on_server_ready")
+        async def consume_broker_selections(**_kwargs: Any) -> None:
+            while True:
+                selected_ids, active_id = await asyncio.to_thread(self._broker_selection_queue.get)
+                self._apply_ids(selected_ids, publish=False, active_strut_id=active_id)
 
     def _start_broker_listener(self) -> None:
         websocket_url = self.api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
@@ -390,13 +506,27 @@ class WebStrutVisualizer:
                 while True:
                     event = json.loads(connection.recv())
                     if event.get("event_type") == "INIT_STATE":
-                        selected = event.get("data", {}).get("active_strut_id")
+                        data = event.get("data", {})
+                        selected_ids = data.get("active_strut_ids") or ([data.get("active_strut_id")] if data.get("active_strut_id") is not None else [])
+                        active_id = data.get("active_strut_id")
                     elif event.get("event_type") == "STRUTS_SELECTED":
-                        selected = (event.get("data", {}).get("strut_ids") or [None])[0]
+                        data = event.get("data", {})
+                        selected_ids = data.get("strut_ids") or []
+                        active_id = data.get("active_strut_id")
+                    elif event.get("event_type") == "STRUT_ACTIVE_CHANGED":
+                        data = event.get("data", {})
+                        selected_ids = data.get("strut_ids") or []
+                        active_id = data.get("strut_id")
                     else:
                         continue
-                    if str(selected) in self.strut_index:
-                        self.state.selected_strut_id = str(selected)
+                    selected_ids = [str(value) for value in selected_ids]
+                    active_id = str(active_id) if active_id is not None else None
+                    if (
+                        selected_ids
+                        and all(value in self.strut_index for value in selected_ids)
+                        and (active_id is None or active_id in selected_ids)
+                    ):
+                        self._broker_selection_queue.put((selected_ids, active_id))
             except Exception as exc:
                 print(f"Broker selection listener stopped: {exc}", flush=True)
 

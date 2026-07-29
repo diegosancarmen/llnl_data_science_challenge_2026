@@ -57,6 +57,17 @@ def make_line_mesh(endpoints_zyx: np.ndarray, colors: list[object] | None = None
     return mesh
 
 
+def placeholder_line_mesh(color: object | None = None) -> pv.PolyData:
+    """Return a valid line mesh for hidden, not-yet-populated VTK actors.
+
+    VTK remote rendering cannot safely bind a completely empty ``PolyData`` to
+    an OpenGL mapper.  Callers should hide the resulting actor until it holds
+    meaningful geometry.
+    """
+    colors = [color] if color is not None else None
+    return make_line_mesh(np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]), colors)
+
+
 def image_grid(volume_zyx: np.ndarray, downsample: int, origin_zyx: np.ndarray) -> pv.ImageData:
     """Create source-aligned PyVista image data from an explicitly downsampled TIFF array."""
     sampled = np.ascontiguousarray(volume_zyx[::downsample, ::downsample, ::downsample])

@@ -1,12 +1,34 @@
-"""Chat-parser regression tests."""
+"""Chat-parser and selection-broker regression tests."""
 
+import asyncio
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import _chat_response, store
+from fastapi import HTTPException
+
+from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import (
+    _chat_response,
+    current_state,
+    publish_active_strut,
+    publish_selection,
+    ReviewDecisionStore,
+    _chat_filter,
+    store,
+)
 
 
 class ChatListingTests(unittest.TestCase):
+    def setUp(self):
+        self._state = (
+            current_state.active_strut_id,
+            list(current_state.active_strut_ids),
+        )
+
+    def tearDown(self):
+        current_state.active_strut_id, current_state.active_strut_ids = self._state
+
     def test_dashboard_summary_is_complete_and_geometry_free(self):
         payload = store.dashboard_records
 
@@ -37,7 +59,56 @@ class ChatListingTests(unittest.TestCase):
         self.assertEqual(response["strut_id"], strut_id)
         self.assertIn("position_fraction", response["reply"])
 
-    def test_bent_listing_returns_primary_defect_ids_with_a_cap(self):
+    def test_explicit_strut_list_selects_each_valid_id(self):
+        strut_ids = store.defect_by_strut.iloc[:4]["strut_id"].astype(int).tolist()
+        response = _chat_response("Select struts " + ", ".join(map(str, strut_ids)))
+
+        self.assertEqual(response["select_strut_ids"], strut_ids)
+
+    def test_selection_can_activate_a_nonfirst_selected_strut(self):
+        strut_ids = store.defect_by_strut.iloc[:2]["strut_id"].astype(int).tolist()
+        result = asyncio.run(publish_selection(strut_ids, active_strut_id=strut_ids[1]))
+
+        self.assertEqual(result["strut_ids"], strut_ids)
+        self.assertEqual(result["active_strut_id"], strut_ids[1])
+        self.assertEqual(current_state.active_strut_id, strut_ids[1])
+
+    def test_active_strut_change_preserves_selected_struts(self):
+        strut_ids = store.defect_by_strut.iloc[:2]["strut_id"].astype(int).tolist()
+        asyncio.run(publish_selection(strut_ids))
+        result = asyncio.run(publish_active_strut(strut_ids[1]))
+
+        self.assertEqual(result["strut_ids"], strut_ids)
+        self.assertEqual(current_state.active_strut_id, strut_ids[1])
+
+    def test_active_strut_must_belong_to_selected_struts(self):
+        strut_ids = store.defect_by_strut.iloc[:2]["strut_id"].astype(int).tolist()
+        asyncio.run(publish_selection(strut_ids))
+        outsider = int(store.defect_by_strut.iloc[2]["strut_id"])
+
+        with self.assertRaises(HTTPException):
+            asyncio.run(publish_active_strut(outsider))
+
+    def test_review_decision_store_persists_latest_decision(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "reviews.json"
+            decisions = ReviewDecisionStore(path)
+            decisions.set(7, "needs_review")
+            decisions.set(7, "nominal")
+
+            restored = ReviewDecisionStore(path)
+            self.assertEqual(restored.items()[0]["strut_id"], 7)
+            self.assertEqual(restored.items()[0]["decision"], "nominal")
+
+    def test_dashboard_records_include_geometry_length(self):
+        self.assertIn("length_um", store.dashboard_records[0])
+
+    def test_chat_filter_counts_primary_defect_rows(self):
+        inflated = _chat_filter(primary_defect="Inflated")
+        expected = store.defect_by_strut[store.defect_by_strut["primary_defect"] == "Inflated"]
+        self.assertEqual(len(inflated), len(expected))
+
+    def test_bent_listing_selects_all_matching_struts(self):
         response = _chat_response("Which struts are classified as bent?")
         expected = store.defect_by_strut[
             store.defect_by_strut["primary_defect"].astype(str).str.casefold() == "bent"
@@ -46,9 +117,23 @@ class ChatListingTests(unittest.TestCase):
         self.assertEqual(response["field"], "primary_defect")
         self.assertEqual(response["value"], "Bent")
         self.assertEqual(response["total"], len(expected))
-        self.assertEqual(response["strut_ids"], expected[:100])
-        self.assertLessEqual(len(response["strut_ids"]), 100)
+        self.assertEqual(response["strut_ids"], expected)
+        self.assertEqual(response["select_strut_ids"], expected)
         self.assertEqual(response["references"], ["/struts?primary_defect=Bent"])
+
+    def test_all_struts_defect_request_selects_every_matching_strut(self):
+        response = _chat_response("I want to know all the struts that are bent")
+        expected = store.defect_by_strut[
+            store.defect_by_strut["primary_defect"].astype(str).str.casefold() == "bent"
+        ]["strut_id"].astype(int).tolist()
+
+        self.assertEqual(response["select_strut_ids"], expected)
+        self.assertIn(f"Selected all {len(expected)}", response["reply"])
+
+    def test_count_question_does_not_change_selection(self):
+        response = _chat_response("How many struts are bent?")
+
+        self.assertNotIn("select_strut_ids", response)
 
     def test_explicit_classification_uses_stage2_field(self):
         response = _chat_response("List struts with Stage 2 classification Missing_Intentional")
