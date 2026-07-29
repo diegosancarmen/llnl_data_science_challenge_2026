@@ -1,10 +1,13 @@
 """Streamlit defect-inspection dashboard."""
 from pathlib import Path
+import json
+import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from google import genai
 
 ROOT = Path(__file__).parent
 UPLOADS = ROOT / "outputs/streamlit_uploads"
@@ -48,6 +51,39 @@ def canon(df, aliases):
         if c and name not in df: df[name] = df[c]
     return df
 def truthy(x): return str(x).strip().lower() in {"true", "1", "yes", "required", "needs review", "needs_review"}
+def gemini_chat_response(question, selected, stations, chat_history):
+    """Generate a response grounded in the active strut and current chat."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "Gemini chat is unavailable because GEMINI_API_KEY is not set."
+
+    selected_summary = json.dumps(selected.to_dict(), default=str, indent=2)
+    station_records = stations.drop(columns=["__position_pct"], errors="ignore").to_dict(orient="records")
+    station_data = json.dumps(station_records, default=str, indent=2)
+    transcript = json.dumps(chat_history, default=str, indent=2)
+    prompt = f"""You are a defect-inspection assistant for a lattice NDE dashboard.
+Answer the user's question using only the inspection context below. Be concise,
+clearly distinguish measured values from interpretation, and say when the data
+does not support a conclusion. Do not invent missing values.
+
+Selected strut summary:
+{selected_summary}
+
+Station-level data for the selected strut:
+{station_data}
+
+Conversation history:
+{transcript}
+
+User's latest question:
+{question}
+"""
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        contents=prompt,
+    )
+    return response.text or "Gemini returned an empty response."
 def display(x, unit="", digits=2):
     if x is None or pd.isna(x) or x == "": return "N/A"
     n = pd.to_numeric(pd.Series([x]), errors="coerce").iloc[0]
@@ -348,12 +384,14 @@ def analysis(summary, station):
         with st.chat_message(message["role"]): st.markdown(message["content"])
     question = st.chat_input(f"Ask about strut {current} or the defect summary")
     if question:
-        st.session_state.setdefault("chat_messages", []).append({"role":"user", "content":question}); q = question.lower()
-        if "review" in q:
-            ids_review = summary[summary.needs_review.map(truthy)].strut_id.astype(int).tolist(); answer = "Struts marked for review: " + (", ".join(map(str, ids_review)) if ids_review else "none reported.")
-        elif "why" in q or "flag" in q: answer = f"Strut {current} reports primary defect {display(value(SUMMARY['primary_defect']))}, stage 2 classification {display(value(SUMMARY['stage2_classification']))}, severity {display(value(SUMMARY['severity']))}, and needs review {display(value(SUMMARY['needs_review']))}."
-        else: answer = f"Strut {current} has {len(stations):,} station records. Ask about its review flag, classification, or station trends."
-        st.session_state["chat_messages"].append({"role":"assistant", "content":answer}); st.rerun()
+        messages = st.session_state.setdefault("chat_messages", [])
+        messages.append({"role": "user", "content": question})
+        try:
+            answer = gemini_chat_response(question, selected, stations, messages)
+        except Exception as exc:
+            answer = f"Gemini chat is unavailable: {exc}"
+        messages.append({"role": "assistant", "content": answer})
+        st.rerun()
 
 st.markdown("""
 <style>

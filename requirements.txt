@@ -7,3 +7,4 @@ fastapi
 uvicorn
 pandas
 websocket-client
+google-genai
