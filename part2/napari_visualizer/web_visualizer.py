@@ -77,8 +77,11 @@ class WebStrutVisualizer:
         self.state.selected_strut_id = self.selected_id
         self.state.macro_ct_visible = True
         self.state.macro_lines_visible = True
+        self.state.macro_active_line_visible = True
         self.state.micro_ct_visible = True
         self.state.micro_lines_visible = True
+        self.state.micro_active_line_visible = True
+
 
         self.macro_plotter = pv.Plotter(off_screen=True, window_size=(900, 600))
         self.micro_plotter = pv.Plotter(off_screen=True, window_size=(900, 600))
@@ -134,8 +137,15 @@ class WebStrutVisualizer:
         )
         self.macro_plotter.add_text("Full lattice", font_size=12)
         # Element picking is handled by the VTK interactor used by VtkRemoteView.
-        self.macro_plotter.enable_element_picking(callback=self._macro_picked, mode="cell", show=False)
+        self.macro_plotter.enable_element_picking(callback=self._macro_picked, mode="cell", show=True, show_message=False)
+        self.macro_plotter.add_text(
+            "Right-click or press P to select strut", 
+            position="lower_left", 
+            font_size=9, 
+            color="gray"
+        )
         self.macro_plotter.reset_camera()
+        self._setup_camera_bounds(self.macro_plotter, min_dist_factor=0.33, max_dist_factor=2.0)
 
         self.micro_plotter.set_background("#161616")
         self.micro_context_actor = self.micro_plotter.add_mesh(
@@ -148,8 +158,12 @@ class WebStrutVisualizer:
         self.micro_plotter.add_text("Selected unit cell", font_size=12)
         self._update_selection(self.selected_id, publish=False)
 
+        self.micro_plotter.reset_camera()
+        self._setup_camera_bounds(self.micro_plotter, min_dist_factor=0.33, max_dist_factor=2.0)
+
     def _build_ui(self) -> None:
-        with self.SinglePageLayout(self.server) as layout:
+        with self.SinglePageLayout(self.server, full_height=True) as layout:
+            layout.theme = "dark"
             layout.title.set_text("Lattice PyVista Viewer")
             with layout.toolbar:
                 self.vuetify3.VSelect(
@@ -157,26 +171,121 @@ class WebStrutVisualizer:
                     density="compact", style="max-width: 280px",
                 )
             with layout.content:
-                with self.vuetify3.VContainer(fluid=True, classes="pa-2"):
-                    with self.vuetify3.VRow(dense=True):
-                        with self.vuetify3.VCol(cols=12, md=6):
-                            self.vuetify3.VCheckbox(v_model=("macro_ct_visible",), label="Full CT scan", density="compact")
-                            self.vuetify3.VCheckbox(v_model=("macro_lines_visible",), label="All centerlines", density="compact")
-                            self.macro_view = self.vtk_widgets.VtkRemoteView(self.macro_plotter.ren_win, interactive_ratio=1)
-                        with self.vuetify3.VCol(cols=12, md=6):
-                            self.vuetify3.VCheckbox(v_model=("micro_ct_visible",), label="Unit-cell CT", density="compact")
-                            self.vuetify3.VCheckbox(v_model=("micro_lines_visible",), label="Unit-cell centerlines", density="compact")
-                            self.micro_view = self.vtk_widgets.VtkRemoteView(self.micro_plotter.ren_win, interactive_ratio=1)
+                with self.vuetify3.VContainer(fluid=True, classes="fill-height pa-2"):
+                    with self.vuetify3.VRow(dense=True, classes="fill-height"):
+                        with self.vuetify3.VCol(cols=12, md=6,
+                                                style="height: 100%; display: flex; flex-direction: column;"):
+                            self.vuetify3.VCheckbox(v_model=("macro_ct_visible",), label="Full CT scan", density="compact", hide_details=True)
+                            self.vuetify3.VCheckbox(v_model=("macro_lines_visible",), label="All centerlines", density="compact", hide_details=True)
+                            self.vuetify3.VCheckbox(v_model=("macro_active_line_visible",), label="Selected centerline", 
+                            density="compact", hide_details=True)
 
+                            with self.html.Div(style="flex: 1 1 auto; height: 100%; min-height: 0; position: relative;"):
+                                self.macro_view = self.vtk_widgets.VtkRemoteView(
+                                    self.macro_plotter.ren_win, 
+                                    interactive_ratio=1,
+                                    style="height: 100%; width: 100%;"
+                                )
+
+                            self.vuetify3.VSlider(
+                                v_model=("macro_zoom", 1.0),
+                                min=0.5, max=3.0, step=0.1,
+                                label="Macro Zoom", density="compact", hide_details=True
+                            )
+
+
+                        with self.vuetify3.VCol(cols=12, md=6,
+                                                style="height: 100%; display: flex; flex-direction: column;"):
+                            self.vuetify3.VCheckbox(v_model=("micro_ct_visible",), label="Unit-cell CT", density="compact", hide_details=True)
+                            self.vuetify3.VCheckbox(v_model=("micro_lines_visible",), label="Unit-cell centerlines", density="compact", hide_details=True)
+                            self.vuetify3.VCheckbox(v_model=("micro_active_line_visible",), label="Selected centerline", 
+                            density="compact", hide_details=True)
+
+
+                            with self.html.Div(style="flex: 1 1 auto; height: 100%; min-height: 0; position: relative;"):
+                                self.micro_view = self.vtk_widgets.VtkRemoteView(
+                                    self.micro_plotter.ren_win, interactive_ratio=1, 
+                                    style="height: 100%; width: 100%;"
+                                )
+
+                            self.vuetify3.VSlider(
+                                v_model=("micro_zoom", 1.0),
+                                min=0.5, max=3.0, step=0.1,
+                                label="Micro Zoom", density="compact", hide_details=True
+                            )
+    def _setup_camera_bounds(
+        self, 
+        plotter: pv.Plotter, 
+        min_dist_factor: float = 0.33,  # Max zoom in (1 / 3.0)
+        max_dist_factor: float = 2.0     # Max zoom out (1 / 0.5)
+    ) -> None:
+        """Clamps mouse wheel and right-click drag zooming directly in VTK."""
+        
+        # Store initial baseline camera distance after scene setup
+        base_dist = plotter.camera.distance
+        min_dist = base_dist * min_dist_factor
+        max_dist = base_dist * max_dist_factor
+
+        def clamp_mouse_zoom(obj, event):
+            cam = plotter.camera
+            current_dist = cam.distance
+            
+            if current_dist < min_dist or current_dist > max_dist:
+                # Clamp the camera distance while preserving focal point and angle
+                clamped_dist = max(min_dist, min(max_dist, current_dist))
+                
+                focal_pt = np.array(cam.focal_point)
+                cam_pos = np.array(cam.position)
+                direction = cam_pos - focal_pt
+                norm = np.linalg.norm(direction)
+                
+                if norm > 0:
+                    direction = direction / norm
+                    cam.position = tuple(focal_pt + direction * clamped_dist)
+
+        # Attach to VTK's EndInteractionEvent (fires after mouse drag/scroll)
+        plotter.iren.add_observer("EndInteractionEvent", clamp_mouse_zoom)
+        # Attach to InteractionEvent (fires continuously during mouse drag)
+        plotter.iren.add_observer("InteractionEvent", clamp_mouse_zoom)
+        
     def _observe_state(self) -> None:
         @self.state.change("selected_strut_id")
         def selected_strut_changed(selected_strut_id: str, **_kwargs: Any) -> None:
             if selected_strut_id in self.strut_index and selected_strut_id != self.selected_id:
                 self._update_selection(selected_strut_id, publish=True)
 
-        @self.state.change("macro_ct_visible", "macro_lines_visible", "micro_ct_visible", "micro_lines_visible")
+        @self.state.change("macro_ct_visible", "macro_lines_visible", "macro_active_line_visible", "micro_ct_visible", "micro_lines_visible", "micro_active_line_visible")
         def visibility_changed(**_kwargs: Any) -> None:
             self._set_visibility()
+
+        MIN_ZOOM = 0.5
+        MAX_ZOOM = 3.0
+
+        @self.state.change("macro_zoom")
+        def _on_macro_zoom_change(macro_zoom, **kwargs):
+            if hasattr(self, "macro_plotter") and self.macro_plotter:
+                # 1. Clamp the state value between MIN and MAX
+                clamped_zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(macro_zoom)))
+                
+                # 2. Reset camera to baseline focal fit, then apply absolute zoom factor
+                self.macro_plotter.reset_camera()
+                self.macro_plotter.camera.zoom(clamped_zoom)
+                
+                # 3. Update view
+                self.macro_view.update()
+
+        @self.state.change("micro_zoom")
+        def _on_micro_zoom_change(micro_zoom, **kwargs):
+            if hasattr(self, "micro_plotter") and self.micro_plotter:
+                # 1. Clamp the state value between MIN and MAX
+                clamped_zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(micro_zoom)))
+                
+                # 2. Reset camera to baseline focal fit, then apply absolute zoom factor
+                self.micro_plotter.reset_camera()
+                self.micro_plotter.camera.zoom(clamped_zoom)
+                
+                # 3. Update view
+                self.micro_view.update()
 
     def _macro_picked(self, picked: pv.DataSet) -> None:
         """Publish a clicked macro centerline when PyVista reports its source cell."""
@@ -243,14 +352,24 @@ class WebStrutVisualizer:
                 print(f"Could not publish selected strut: {exc}", flush=True)
 
     def _set_visibility(self) -> None:
+        # Macro pane visibility
         for actor in self.macro_ct_actors:
             actor.SetVisibility(self.state.macro_ct_visible)
         self.macro_all_actor.SetVisibility(self.state.macro_lines_visible)
-        self.macro_selected_actor.SetVisibility(True)
+        
+        # Check if macro_active_line_visible exists in state; default to True if not set
+        macro_active = getattr(self.state, "macro_active_line_visible", True)
+        self.macro_selected_actor.SetVisibility(macro_active)
+
+        # Micro pane visibility
         for actor in getattr(self, "micro_ct_actors", []):
             actor.SetVisibility(self.state.micro_ct_visible)
         self.micro_context_actor.SetVisibility(self.state.micro_lines_visible)
-        self.micro_selected_actor.SetVisibility(True)
+        
+        # Check if micro_active_line_visible exists in state; default to True if not set
+        micro_active = getattr(self.state, "micro_active_line_visible", True)
+        self.micro_selected_actor.SetVisibility(micro_active)
+
         self._render()
 
     def _render(self) -> None:
