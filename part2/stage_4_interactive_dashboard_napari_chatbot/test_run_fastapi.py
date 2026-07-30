@@ -9,8 +9,10 @@ from time import perf_counter
 from fastapi import HTTPException
 
 from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import (
+    ChatRequest,
     _chat_format_metric,
     _chat_response,
+    chat,
     current_state,
     publish_active_strut,
     publish_selection,
@@ -144,6 +146,34 @@ class ChatListingTests(unittest.TestCase):
 
         self.assertEqual(response["select_strut_ids"], expected)
         self.assertIn(f"Selected all {len(expected)}", response["reply"])
+
+    def test_dashboard_defect_prompts_select_every_primary_defect_category(self):
+        categories = sorted(
+            {
+                str(value) for value in store.defect_by_strut["primary_defect"].dropna()
+                if str(value).strip().casefold() not in {"", "nominal", "nan", "unknown"}
+            },
+            key=str.casefold,
+        )
+
+        for category in categories:
+            with self.subTest(category=category):
+                expected = store.defect_by_strut.loc[
+                    store.defect_by_strut["primary_defect"].astype(str).str.casefold() == category.casefold(),
+                    "strut_id",
+                ].astype(int).tolist()
+                response = _chat_response(
+                    f"Inspect all struts with primary defect {category}"
+                )
+
+                self.assertNotEqual(response.get("result_type"), "strut_summary")
+                self.assertEqual(response["select_strut_ids"], expected)
+                self.assertEqual(response["strut_ids"], expected)
+                self.assertEqual(response["total"], len(expected))
+
+                published = asyncio.run(chat(ChatRequest(message=f"Inspect all struts with primary defect {category}")))
+                self.assertEqual(published["selection"]["strut_ids"], expected)
+                self.assertEqual(published["selection"]["active_strut_id"], expected[0])
 
     def test_count_question_does_not_change_selection(self):
         response = _chat_response("How many struts are bent?")

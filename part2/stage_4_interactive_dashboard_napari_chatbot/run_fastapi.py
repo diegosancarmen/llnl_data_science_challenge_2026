@@ -759,6 +759,69 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             "reply": f"None of the requested strut IDs are in the loaded dataset: {', '.join(map(str, raw_explicit_ids))}.",
             "result_type": "unknown_strut", "references": [],
         }
+
+    # Resolve dataset categories before interpreting "inspect" as a request
+    # for the active strut. Dashboard defect prompts deliberately contain
+    # both words (for example, "Inspect all ... Bent struts"), but they are
+    # collection selections and must not be reduced to the active strut.
+    defect_names = sorted(store.defect_by_strut["primary_defect"].dropna().astype(str), key=str.casefold)
+    classification_column = "stage2_classification"
+    classification_names = sorted(
+        store.defect_by_strut[classification_column].dropna().astype(str), key=str.casefold
+    )
+
+    def normalized_label(value: str) -> str:
+        return re.sub(r"[\s_-]+", "", value.casefold())
+
+    def matching_name(names: List[str]) -> Optional[str]:
+        return next(
+            (
+                name for name in names
+                if normalized_label(name) in normalized_text
+                or normalized_label(_chat_display_category(name)) in normalized_text
+            ),
+            None,
+        )
+
+    requested_defect = matching_name(defect_names)
+    requested_classification = matching_name(classification_names)
+    explicitly_defect = "primary defect" in lower
+    explicitly_classification = "stage 2" in lower or "stage2" in lower or "classification" in lower
+    if explicitly_defect:
+        category_field, category_value = "primary_defect", requested_defect
+    elif explicitly_classification:
+        category_field, category_value = classification_column, requested_classification
+    else:
+        category_field, category_value = (
+            (classification_column, requested_classification)
+            if requested_classification
+            else ("primary_defect", requested_defect)
+        )
+
+    list_intent = any(token in lower for token in ("which", "what", "list", "show", "find"))
+    all_struts_request = bool(re.search(r"\ball\s+(?:the\s+)?struts?\b", lower))
+    direct_selection_intent = any(token in lower for token in ("select", "highlight", "visualize"))
+    collection_intent = list_intent or all_struts_request or direct_selection_intent
+    if category_value and collection_intent:
+        frame = store.defect_by_strut[
+            store.defect_by_strut[category_field].astype(str).str.casefold() == category_value.casefold()
+        ]
+        strut_ids = [int(value) for value in frame["strut_id"].tolist()]
+        label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
+        display_value = _chat_display_category(category_value)
+        return {
+            "reply": (
+                f"There are {len(strut_ids)} struts with {label} {display_value}. "
+                + f"Selected all {len(strut_ids)} matching struts."
+            ),
+            "select_strut_ids": strut_ids,
+            "strut_ids": strut_ids,
+            "total": len(strut_ids),
+            "field": category_field,
+            "value": category_value,
+            "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
+        }
+
     if any(token in lower for token in ("inspect", "detail", "information", "summarize")) and len(ids) > 1:
         frame = _chat_summary_frame()
         selected = frame[frame["strut_id"].astype(int).isin(ids)]
@@ -928,45 +991,6 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             "references": ["/struts?needs_review=true"],
         }
 
-    defect_names = sorted(store.defect_by_strut["primary_defect"].dropna().astype(str), key=str.casefold)
-    classification_column = "stage2_classification"
-    classification_names = sorted(
-        store.defect_by_strut[classification_column].dropna().astype(str), key=str.casefold
-    )
-
-    def normalized_label(value: str) -> str:
-        """Make display labels match natural spacing and punctuation variants."""
-        return re.sub(r"[\s_-]+", "", value.casefold())
-
-    def matching_name(names: List[str]) -> Optional[str]:
-        return next(
-            (
-                name for name in names
-                if normalized_label(name) in normalized_text
-                or normalized_label(_chat_display_category(name)) in normalized_text
-            ),
-            None,
-        )
-
-    requested_defect = matching_name(defect_names)
-    requested_classification = matching_name(classification_names)
-    explicitly_defect = "primary defect" in lower
-    explicitly_classification = "stage 2" in lower or "stage2" in lower or "classification" in lower
-
-    if explicitly_defect:
-        category_field, category_value = "primary_defect", requested_defect
-    elif explicitly_classification:
-        category_field, category_value = classification_column, requested_classification
-    else:
-        # A bare value that could be in either column (such as Nominal) means
-        # classification; values unique to primary_defect (such as Bent) still
-        # resolve naturally to their defect row.
-        category_field, category_value = (
-            (classification_column, requested_classification)
-            if requested_classification
-            else ("primary_defect", requested_defect)
-        )
-
     missing_word = bool(re.search(r"\bmissing\b", re.sub(r"[_-]", " ", lower)))
     if missing_word and not category_value:
         missing_counts = {
@@ -984,26 +1008,6 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
                 "/struts?primary_defect=Missing_Intentional",
                 "/struts?primary_defect=Missing_Unintentional",
             ],
-        }
-
-    if category_value and collection_intent:
-        frame = store.defect_by_strut[
-            store.defect_by_strut[category_field].astype(str).str.casefold() == category_value.casefold()
-        ]
-        strut_ids = [int(value) for value in frame["strut_id"].tolist()]
-        label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
-        display_value = _chat_display_category(category_value)
-        return {
-            "reply": (
-                f"There are {len(strut_ids)} struts with {label} {display_value}. "
-                + f"Selected all {len(strut_ids)} matching struts."
-            ),
-            "select_strut_ids": strut_ids,
-            "strut_ids": strut_ids,
-            "total": len(strut_ids),
-            "field": category_field,
-            "value": category_value,
-            "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
         }
 
     if category_value and ("how many" in lower or "count" in lower or "summary" in lower):
