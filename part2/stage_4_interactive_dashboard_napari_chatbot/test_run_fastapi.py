@@ -169,6 +169,7 @@ class ChatListingTests(unittest.TestCase):
             "Which struts are Missing Intentional?",
             "Which struts are missing-intentional?",
             "Which struts are MISSING_INTENTIONAL?",
+            "Which struts are Missing by Design?",
         ):
             response = _chat_response(prompt)
             self.assertEqual(response["field"], "stage2_classification")
@@ -184,6 +185,8 @@ class ChatListingTests(unittest.TestCase):
             {"Missing_Intentional": 87, "Missing_Unintentional": 331},
         )
         self.assertIn("Please specify", response["reply"])
+        self.assertIn("Missing by Design", response["reply"])
+        self.assertIn("Missing by Accident", response["reply"])
 
     def test_chat_explains_known_data_terms(self):
         response = _chat_response("What does material occupancy mean?")

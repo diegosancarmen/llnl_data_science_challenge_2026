@@ -110,14 +110,24 @@ def save_review(strut_id: int, decision: str) -> None:
 def material_status(row: pd.Series) -> tuple[str, str, str]:
     classification = str(row.get("stage2_classification", "Unknown"))
     if classification == "Nominal":
-        return "Nominally present", "Material is expected at this CAD strut.", "present"
+        return "Present by design", "Material is expected at this CAD strut.", "present"
     if classification == "Missing_Intentional":
-        return "Nominally missing", "CAD intentionally expects no material at this strut.", "missing"
+        return "Missing by Design", "CAD intentionally expects no material at this strut.", "missing"
     if classification == "Missing_Unintentional":
-        return "Unexpectedly missing", "CAD expects material, but this strut is missing.", "missing"
+        return "Missing by Accident", "CAD expects material, but this strut is missing.", "missing"
     if classification == "Expected_Missing_But_Material_Present":
         return "Unexpected material", "Material is present where CAD expects the strut to be absent.", "warning"
     return classification.replace("_", " "), "No material-status interpretation is available.", "neutral"
+
+
+DISPLAY_CLASSIFICATION_NAMES = {
+    "Missing_Intentional": "Missing by Design",
+    "Missing_Unintentional": "Missing by Accident",
+}
+
+
+def display_classification(value: Any) -> str:
+    return DISPLAY_CLASSIFICATION_NAMES.get(str(value), str(value).replace("_", " "))
 
 
 def primary_label(row: pd.Series) -> str:
@@ -148,47 +158,56 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
     frame = summary.copy()
     frame["__material_status"] = frame.apply(lambda row: material_status(row)[0], axis=1)
     frame["__primary_label"] = frame.apply(primary_label, axis=1)
-    missing = frame["__material_status"] == "Nominally missing"
-    frame.loc[missing, "__primary_label"] = frame.loc[missing, "stage2_classification"].astype(str).str.replace("_", " ")
+    missing = frame["__material_status"] == "Missing by Design"
+    frame.loc[missing, "__primary_label"] = frame.loc[missing, "stage2_classification"].map(display_classification)
 
-    material_labels = [
-        "Nominally present", "Nominally missing", "Unexpectedly missing", "Unexpected material",
-    ]
+    material_labels = ["Present by design", "Missing by Design", "Missing by Accident", "Unexpected material"]
     material_counts = frame["__material_status"].value_counts().reindex(material_labels, fill_value=0)
     total_struts = len(frame)
     nominal_count = int(material_counts.iloc[0])
     other_count = int(material_counts.iloc[1:].sum())
-    overview_axis_max = max(total_struts * 1.16, 1)
-    breakout_axis_max = max(other_count * 1.16, 1)
+    log_floor = 0.1
+
+    def share_text(count: int) -> str:
+        share = (count / total_struts * 100) if total_struts else 0
+        return "<0.01%" if count > 0 and share < 0.01 else f"{share:.1f}%"
 
     material_bars = make_subplots(
         rows=1, cols=2, column_widths=[0.42, 0.58], horizontal_spacing=0.18,
-        subplot_titles=("All struts", "Breakout: Other material statuses"),
+        subplot_titles=("All Struts", "Other struts (magnified)"),
     )
     for label, count, color in (
-        ("Nominally present", nominal_count, "#22c55e"),
-        ("Other", other_count, "#f59e0b"),
+        ("Present by design", nominal_count, "#22c55e"),
+        ("Other", other_count, "#64748b"),
     ):
+        plotted_count = max(count, log_floor)
         material_bars.add_bar(
-            x=["All struts"], y=[count], name=label, marker_color=color,
-            text=[f"{count:,}<br>{count / total_struts:.1%}" if total_struts else "0"],
+            x=["All Struts"], y=[plotted_count], name=label, marker_color=color,
+            text=[f"{count:,}<br>{share_text(count)}"],
             textposition="inside",
-            customdata=[count / total_struts if total_struts else 0],
-            hovertemplate=f"{label}<br>%{{y:,}} struts<br>%{{customdata:.1%}} of all struts<extra></extra>",
+            customdata=[[count, share_text(count)]],
+            hovertemplate=f"{label}<br>%{{customdata[0]:,}} struts<br>%{{customdata[1]}} of all struts<extra></extra>",
             row=1, col=1,
         )
-    for label, count, color in zip(material_labels[1:], material_counts.iloc[1:].astype(int), ["#ef4444", "#fb7185", "#f59e0b"]):
+    for label, count, color in zip(material_labels[1:], material_counts.iloc[1:].astype(int), ["#ef4444", "#a855f7", "#0ea5e9"]):
+        plotted_count = max(int(count), log_floor)
         material_bars.add_bar(
-            x=["Other"], y=[count], name=label, marker_color=color,
-            text=[f"{count:,}<br>{count / total_struts:.1%}" if total_struts else "0"],
+            x=["Other struts"], y=[plotted_count], name=label, marker_color=color,
+            text=[f"{count:,}<br>{share_text(int(count))}"],
             textposition="inside",
-            customdata=[count / total_struts if total_struts else 0],
-            hovertemplate=f"{label}<br>%{{y:,}} struts<br>%{{customdata:.1%}} of all struts<extra></extra>",
+            customdata=[[int(count), share_text(int(count))]],
+            hovertemplate=f"{label}<br>%{{customdata[0]:,}} struts<br>%{{customdata[1]}} of all struts<extra></extra>",
             row=1, col=2,
         )
-    other_bottom = nominal_count / overview_axis_max
-    other_top = total_struts / overview_axis_max
-    breakout_top = other_count / breakout_axis_max
+    # Connector positions are normalized in log space so the callout remains
+    # visually aligned after tiny categories are made visible.
+    def log_position(value: float, maximum: float) -> float:
+        upper = max(maximum, log_floor) * 1.16
+        return (np.log10(max(value, log_floor)) - np.log10(log_floor)) / (np.log10(upper) - np.log10(log_floor))
+
+    other_bottom = log_position(nominal_count, total_struts)
+    other_top = log_position(total_struts, total_struts)
+    breakout_top = log_position(other_count, other_count)
     material_bars.add_shape(
         type="line", xref="paper", yref="paper", x0=0.36, y0=other_bottom, x1=0.50, y1=0,
         line={"color": "#fbbf24", "width": 1.5, "dash": "dot"},
@@ -201,11 +220,11 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
         x=0.43, y=min(0.94, max(0.06, (other_bottom + other_top) / 2)), xref="paper", yref="paper",
         text="<b>Zoom</b><br>Other", showarrow=False, font={"size": 11, "color": "#fbbf24"}, align="center",
     )
-    material_bars.update_yaxes(range=[0, overview_axis_max], title_text="Strut count", row=1, col=1)
-    material_bars.update_yaxes(range=[0, breakout_axis_max], title_text="Strut count", row=1, col=2)
+    material_bars.update_yaxes(type="log", title_text="Strut count (log scale)", row=1, col=1)
+    material_bars.update_yaxes(type="log", title_text="Strut count (log scale)", row=1, col=2)
     material_bars.update_layout(
         barmode="stack", height=335, showlegend=True, legend={"orientation": "h", "y": -0.20},
-        margin=dict(l=10, r=10, t=62, b=70), title="Material status",
+        margin=dict(l=10, r=10, t=62, b=70), title=f"Material status — {total_struts:,} struts",
     )
 
     defect_frame = frame[frame["__primary_label"] != "No detected geometry defect"]
@@ -214,6 +233,19 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
     automated_review = frame["needs_review"].map(truthy)
     unresolved = int(sum(automated_review & ~frame["strut_id"].astype(int).isin(reviews)))
     final_counts = pd.Series([item["decision"] for item in reviews.values()]).value_counts().to_dict()
+    reviewed_ids = {int(strut_id) for strut_id in reviews}
+    summary_ids = set(frame["strut_id"].astype(int))
+    saved_nominal_ids = {
+        int(strut_id) for strut_id, item in reviews.items()
+        if item.get("decision") == "nominal" and int(strut_id) in summary_ids
+    }
+    unflagged_nominal_ids = set(frame.loc[
+        (frame["stage2_classification"] == "Nominal")
+        & ~automated_review
+        & ~frame["strut_id"].astype(int).isin(reviewed_ids),
+        "strut_id",
+    ].astype(int))
+    final_nominal = len(saved_nominal_ids | unflagged_nominal_ids)
     content_col, queue_col = st.columns([4.0, 1.0])
     with content_col:
         st.plotly_chart(chart(material_bars, 335), width='stretch')
@@ -232,7 +264,7 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
         st.markdown("### Review queue")
         metric("Unresolved", f"{unresolved:,}", "Automated review flags without a final saved decision.")
         st.caption(f"Automated flags: {int(automated_review.sum()):,}")
-        st.caption(f"Final nominal: {final_counts.get('nominal', 0):,}")
+        st.caption(f"Final nominal: {final_nominal:,} / {total_struts:,} ({final_nominal / total_struts:.1%})")
         st.caption(f"Final needs review: {final_counts.get('needs_review', 0):,}")
         st.caption(f"Confirmed defect: {final_counts.get('confirmed_defect', 0):,}")
 
@@ -527,7 +559,7 @@ def analysis(summary):
             ("Explain Stage 2", "What is Stage 2 classification?"),
         ],
         "Inspect by defect": [
-            (f"All {category}", f"Inspect all struts with primary defect {category}")
+            (f"All {display_classification(category)}", f"Inspect all struts with primary defect {display_classification(category)}")
             for category in defect_categories
         ],
     }

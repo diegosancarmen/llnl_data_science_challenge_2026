@@ -521,7 +521,7 @@ CHAT_METRICS: Dict[str, Dict[str, Any]] = {
 }
 
 CHAT_GLOSSARY = {
-    "stage 2 classification": "Stage 2 classification describes whether material is nominally present, intentionally missing, unexpectedly missing, or unexpectedly present relative to CAD.",
+    "stage 2 classification": "Stage 2 classification describes whether material is present by design, missing by design, missing by accident, or unexpectedly present relative to CAD.",
     "primary defect": "Primary defect is the dominant automated geometry-defect label assigned to a strut. Secondary defects record additional concurrent signals.",
     "needs review": "Needs review is an automated flag indicating that a strut should receive human inspection; it is not a final review decision.",
     "material occupancy": "Material occupancy is the sampled fraction of the expected strut region containing CT material. It is reported as a percentage.",
@@ -529,6 +529,15 @@ CHAT_GLOSSARY = {
     "outside nominal": "Outside-nominal material is measured material outside the expected strut region; it is reported as a percentage.",
     "station": "A station is a sampled position along a strut. Station records contain local occupancy, equivalent radius, centerline offset, intensity, and outside-nominal material.",
 }
+
+DISPLAY_CATEGORY_NAMES = {
+    "Missing_Intentional": "Missing by Design",
+    "Missing_Unintentional": "Missing by Accident",
+}
+
+
+def _chat_display_category(value: str) -> str:
+    return DISPLAY_CATEGORY_NAMES.get(value, value)
 
 
 def _chat_summary_frame() -> pd.DataFrame:
@@ -930,7 +939,14 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         return re.sub(r"[\s_-]+", "", value.casefold())
 
     def matching_name(names: List[str]) -> Optional[str]:
-        return next((name for name in names if normalized_label(name) in normalized_text), None)
+        return next(
+            (
+                name for name in names
+                if normalized_label(name) in normalized_text
+                or normalized_label(_chat_display_category(name)) in normalized_text
+            ),
+            None,
+        )
 
     requested_defect = matching_name(defect_names)
     requested_classification = matching_name(classification_names)
@@ -959,9 +975,9 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         }
         return {
             "reply": (
-                "Please specify whether you mean Missing_Intentional "
+                "Please specify whether you mean Missing by Design "
                 f"({missing_counts['Missing_Intentional']} struts) or "
-                f"Missing_Unintentional ({missing_counts['Missing_Unintentional']} struts)."
+                f"Missing by Accident ({missing_counts['Missing_Unintentional']} struts)."
             ),
             "missing_subtypes": missing_counts,
             "references": [
@@ -976,9 +992,10 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         ]
         strut_ids = [int(value) for value in frame["strut_id"].tolist()]
         label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
+        display_value = _chat_display_category(category_value)
         return {
             "reply": (
-                f"There are {len(strut_ids)} struts with {label} {category_value}. "
+                f"There are {len(strut_ids)} struts with {label} {display_value}. "
                 + f"Selected all {len(strut_ids)} matching struts."
             ),
             "select_strut_ids": strut_ids,
@@ -995,7 +1012,7 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         ]
         label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
         return {
-            "reply": f"There are {len(frame)} struts with {label} {category_value}.",
+            "reply": f"There are {len(frame)} struts with {label} {_chat_display_category(category_value)}.",
             "result_type": "category_count", "field": category_field, "value": category_value, "count": len(frame),
             "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
         }
@@ -1006,7 +1023,7 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             store.defect_by_strut["primary_defect"].astype(str) == requested_defect, "strut_id"
         ].astype(int).tolist() if "select" in lower else None
         return {
-            "reply": f"There are {count} struts with primary defect {requested_defect}." + (f" Selected all {count}." if selected_ids else ""),
+            "reply": f"There are {count} struts with primary defect {_chat_display_category(requested_defect)}." + (f" Selected all {count}." if selected_ids else ""),
             "defect": requested_defect,
             "count": count,
             "select_strut_ids": selected_ids,
