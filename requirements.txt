@@ -14,3 +14,5 @@ requests
 trame
 trame-vtk
 trame-vuetify
+plotly
+streamlit

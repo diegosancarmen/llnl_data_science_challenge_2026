@@ -133,6 +133,17 @@ def status_card(label: str, value: str, detail: str, tone: str = "neutral") -> N
     )
 
 
+def defect_count_card(label: str, count: int, percent: float, intensity: float) -> None:
+    """Render one compact card for the horizontal defect-category row."""
+    lightness = 72 - (27 * intensity)
+    color = f"hsl(25, 92%, {lightness:.0f}%)"
+    st.markdown(
+        f'<div class="defect-card" style="border-left-color:{color}"><div class="status-label">{escape(label)}</div>'
+        f'<div class="status-value">{count:,}</div><div class="status-detail">{percent:.1f}% of defects</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str, Any]]) -> None:
     frame = summary.copy()
     frame["__material_status"] = frame.apply(lambda row: material_status(row)[0], axis=1)
@@ -140,37 +151,83 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
     missing = frame["__material_status"] == "Nominally missing"
     frame.loc[missing, "__primary_label"] = frame.loc[missing, "stage2_classification"].astype(str).str.replace("_", " ")
 
-    parent_counts = frame["__material_status"].value_counts()
-    pie = go.Figure(go.Pie(
-        labels=parent_counts.index, values=parent_counts.values, hole=0.45,
-        hovertemplate="%{label}<br>%{value:,} struts<br>%{percent:.2%} of all struts<extra></extra>",
-    ))
-    pie.update_layout(margin=dict(l=0, r=0, t=35, b=0), title="Material status")
+    material_labels = [
+        "Nominally present", "Nominally missing", "Unexpectedly missing", "Unexpected material",
+    ]
+    material_counts = frame["__material_status"].value_counts().reindex(material_labels, fill_value=0)
+    total_struts = len(frame)
+    nominal_count = int(material_counts.iloc[0])
+    other_count = int(material_counts.iloc[1:].sum())
+    overview_axis_max = max(total_struts * 1.16, 1)
+    breakout_axis_max = max(other_count * 1.16, 1)
+
+    material_bars = make_subplots(
+        rows=1, cols=2, column_widths=[0.42, 0.58], horizontal_spacing=0.18,
+        subplot_titles=("All struts", "Breakout: Other material statuses"),
+    )
+    for label, count, color in (
+        ("Nominally present", nominal_count, "#22c55e"),
+        ("Other", other_count, "#f59e0b"),
+    ):
+        material_bars.add_bar(
+            x=["All struts"], y=[count], name=label, marker_color=color,
+            text=[f"{count:,}<br>{count / total_struts:.1%}" if total_struts else "0"],
+            textposition="inside",
+            customdata=[count / total_struts if total_struts else 0],
+            hovertemplate=f"{label}<br>%{{y:,}} struts<br>%{{customdata:.1%}} of all struts<extra></extra>",
+            row=1, col=1,
+        )
+    for label, count, color in zip(material_labels[1:], material_counts.iloc[1:].astype(int), ["#ef4444", "#fb7185", "#f59e0b"]):
+        material_bars.add_bar(
+            x=["Other"], y=[count], name=label, marker_color=color,
+            text=[f"{count:,}<br>{count / total_struts:.1%}" if total_struts else "0"],
+            textposition="inside",
+            customdata=[count / total_struts if total_struts else 0],
+            hovertemplate=f"{label}<br>%{{y:,}} struts<br>%{{customdata:.1%}} of all struts<extra></extra>",
+            row=1, col=2,
+        )
+    other_bottom = nominal_count / overview_axis_max
+    other_top = total_struts / overview_axis_max
+    breakout_top = other_count / breakout_axis_max
+    material_bars.add_shape(
+        type="line", xref="paper", yref="paper", x0=0.36, y0=other_bottom, x1=0.50, y1=0,
+        line={"color": "#fbbf24", "width": 1.5, "dash": "dot"},
+    )
+    material_bars.add_shape(
+        type="line", xref="paper", yref="paper", x0=0.36, y0=other_top, x1=0.50, y1=breakout_top,
+        line={"color": "#fbbf24", "width": 1.5, "dash": "dot"},
+    )
+    material_bars.add_annotation(
+        x=0.43, y=min(0.94, max(0.06, (other_bottom + other_top) / 2)), xref="paper", yref="paper",
+        text="<b>Zoom</b><br>Other", showarrow=False, font={"size": 11, "color": "#fbbf24"}, align="center",
+    )
+    material_bars.update_yaxes(range=[0, overview_axis_max], title_text="Strut count", row=1, col=1)
+    material_bars.update_yaxes(range=[0, breakout_axis_max], title_text="Strut count", row=1, col=2)
+    material_bars.update_layout(
+        barmode="stack", height=335, showlegend=True, legend={"orientation": "h", "y": -0.20},
+        margin=dict(l=10, r=10, t=62, b=70), title="Material status",
+    )
 
     defect_frame = frame[frame["__primary_label"] != "No detected geometry defect"]
-    defect_counts = defect_frame["__primary_label"].value_counts().sort_values()
-    defect_percent = defect_counts / defect_counts.sum() * 100
-    defect_bars = go.Figure(go.Bar(
-        x=defect_counts.values,
-        y=defect_counts.index,
-        orientation="h",
-        marker_color="#f97316",
-        text=[f"{count:,} ({percent:.1f}%)" for count, percent in zip(defect_counts.values, defect_percent.values)],
-        textposition="outside",
-        hovertemplate="%{y}<br>%{x:,} struts<br>%{customdata:.2f}% of defect-bearing struts<extra></extra>",
-        customdata=defect_percent.values,
-    ))
-    defect_bars.update_layout(
-        height=300, margin=dict(l=10, r=65, t=42, b=10), title="Defect-bearing struts",
-        xaxis_title="Strut count", yaxis_title=None,
-    )
+    defect_counts = defect_frame["__primary_label"].value_counts().sort_values(ascending=False)
 
     automated_review = frame["needs_review"].map(truthy)
     unresolved = int(sum(automated_review & ~frame["strut_id"].astype(int).isin(reviews)))
     final_counts = pd.Series([item["decision"] for item in reviews.values()]).value_counts().to_dict()
-    pie_col, defects_col, queue_col = st.columns([1.2, 2.1, 0.7])
-    with pie_col: st.plotly_chart(chart(pie, 300), width='stretch')
-    with defects_col: st.plotly_chart(chart(defect_bars, 300), width='stretch')
+    content_col, queue_col = st.columns([4.0, 1.0])
+    with content_col:
+        st.plotly_chart(chart(material_bars, 335), width='stretch')
+        st.markdown("### Defect-bearing struts")
+        if defect_counts.empty:
+            st.info("No geometry defects detected.")
+        else:
+            minimum = int(defect_counts.min())
+            maximum = int(defect_counts.max())
+            defect_columns = st.columns(len(defect_counts))
+            for column, (label, count) in zip(defect_columns, defect_counts.items()):
+                intensity = 1.0 if maximum == minimum else (int(count) - minimum) / (maximum - minimum)
+                with column:
+                    defect_count_card(label, int(count), int(count) / len(defect_frame) * 100, intensity)
     with queue_col:
         st.markdown("### Review queue")
         metric("Unresolved", f"{unresolved:,}", "Automated review flags without a final saved decision.")
@@ -287,87 +344,11 @@ def analysis(summary):
         reviews = {}
         st.warning(f"Could not load saved review decisions: {exc}")
     render_statistics_banner(summary, reviews)
-    filter_keys = ["filter_search", "filter_primary", "filter_stage2", "filter_review", "filter_severity"]
-    source_columns = {
-        "occupancy": col(summary, SUMMARY["occupancy"]),
-        "deviation": col(summary, SUMMARY["deviation"]),
-        "ratio": col(summary, SUMMARY["ratio"] + ["diameter_ratio_to_nominal"]),
-        "diameter": col(summary, SUMMARY["diameter"]),
-        "bent": col(summary, ["curvature", "tortuosity", "tortuosity_ratio", "bend_curvature"]),
-        "review": col(summary, SUMMARY["needs_review"]),
-    }
-    ratio_or_diameter = source_columns["ratio"] or source_columns["diameter"]
-    quick_requirements = {
-        "Lowest occupancy": source_columns["occupancy"],
-        "Largest deviation": source_columns["deviation"],
-        "Thinnest": ratio_or_diameter,
-        "Thickest/inflated": ratio_or_diameter,
-        "Most bent": source_columns["bent"],
-        "Needs review": source_columns["review"],
-    }
-    quick_actions = [("Lowest occupancy", "lowest_occupancy"), ("Largest deviation", "largest_deviation"), ("Thinnest", "thinnest"), ("Thickest/inflated", "thickest_inflated"), ("Most bent", "most_bent"), ("Needs review", "needs_review")]
-
-    def quick_candidates(choice):
-        frame = summary.copy()
-        if choice == "Needs review":
-            frame = frame[frame.needs_review.map(truthy)]
-            return frame.sort_values("strut_id"), int(frame.iloc[0].strut_id) if len(frame) else None
-        aliases = {
-            "Lowest occupancy": SUMMARY["occupancy"],
-            "Largest deviation": SUMMARY["deviation"],
-            "Thinnest": SUMMARY["ratio"] + ["diameter_ratio_to_nominal"] if source_columns["ratio"] else SUMMARY["diameter"],
-            "Thickest/inflated": SUMMARY["ratio"] + ["diameter_ratio_to_nominal"] if source_columns["ratio"] else SUMMARY["diameter"],
-            "Most bent": ["curvature", "tortuosity", "tortuosity_ratio", "bend_curvature"],
-        }
-        source = col(frame, aliases[choice])
-        if source is None: return frame.sort_values("strut_id"), None
-        ranked = frame.copy(); ranked["__quick_metric"] = pd.to_numeric(ranked[source], errors="coerce")
-        ascending = choice in {"Lowest occupancy", "Thinnest"}
-        ranked = ranked.dropna(subset=["__quick_metric"]).sort_values(["__quick_metric", "strut_id"], ascending=[ascending, True]).drop(columns="__quick_metric")
-        return ranked, int(ranked.iloc[0].strut_id) if len(ranked) else None
-
-    def activate_quick_pick(choice):
-        candidates, picked = quick_candidates(choice)
-        if picked is None: return
-        for filter_key in filter_keys: st.session_state.pop(filter_key, None)
-        st.session_state.quick_pick_state = choice
-        st.session_state.show_matching_struts = True
-        st.session_state.selected_strut_id = picked
-        st.session_state.selected_strut_picker = picked
-
-    def reset_filters():
-        for filter_key in filter_keys: st.session_state.pop(filter_key, None)
-        st.session_state.pop("quick_pick_state", None)
-        st.session_state.pop("selected_strut_id", None)
-        st.session_state.pop("selected_strut_picker", None)
-        st.session_state.show_matching_struts = False
-
-    with st.container(border=True):
-        st.subheader("Inspection Start")
-        search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
-        primary, stage2, review, sev = [], [], [], []
-        st.caption(f"Loaded dataset: {len(summary):,} struts")
-        quick_picks = st.columns(6)
-        for button, (label, action) in zip(quick_picks, quick_actions):
-            available = quick_requirements[label] is not None
-            help_text = None if available else f"Unavailable: required metric for {label.lower()} is not present in the FastAPI summary."
-            button.button(label, key=f"quick_pick_{action}", disabled=not available, help=help_text, width='stretch', on_click=activate_quick_pick, args=(label,))
-        st.button("Reset filters", key="reset_filters", use_container_width=False, on_click=reset_filters)
-
-    quick_state = st.session_state.get("quick_pick_state")
-    quick_active = bool(quick_state and not search.strip() and not primary and not stage2 and not review and not sev)
-    if quick_active:
-        filtered, quick_selected = quick_candidates(quick_state)
-        st.info(f"Quick pick active: {quick_state} - showing top candidates.")
-    else:
-        mask = pd.Series(True, index=summary.index)
-        if primary: mask &= summary.primary_defect.astype(str).isin(primary)
-        if stage2: mask &= summary.stage2_classification.astype(str).isin(stage2)
-        if review: mask &= summary.needs_review.astype(str).isin(review)
-        if sev: mask &= summary.severity.astype(str).isin(sev)
-        filtered = summary[mask].copy()
-        if search.strip(): filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
-        filtered = filtered.sort_values("strut_id")
+    search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
+    filtered = summary.copy()
+    if search.strip():
+        filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
+    filtered = filtered.sort_values("strut_id")
     ids = filtered.strut_id.astype(int).tolist()
     st.caption(f"Showing {len(ids):,} of {len(summary):,} struts.")
     browse = st.button("Browse matching struts", key="browse_matching_struts", use_container_width=False)
@@ -377,7 +358,7 @@ def analysis(summary):
         useful = [x for x in ["strut_id", "primary_defect", "stage2_classification", "severity", "needs_review"] if x in filtered]
         table_event = st.dataframe(filtered[useful], hide_index=True, height=420, width='stretch', on_select="rerun", selection_mode="single-row", key="defect_queue")
     if not ids:
-        st.warning("No struts match the current filters."); return
+        st.warning("No struts match this Strut ID search."); return
 
     previous = st.session_state.get("selected_strut_id")
     current = int(previous) if previous in ids else ids[0]
@@ -428,6 +409,17 @@ def analysis(summary):
         if number is None or pd.isna(number): return "N/A"
         number = float(number) * 100 if abs(float(number)) <= 1 else float(number)
         return f"{number:.{digits}f}%"
+    def nominal_median(aliases, convert_radius_to_diameter=False):
+        source = col(summary, aliases)
+        if source is None:
+            return None
+        values = pd.to_numeric(
+            summary.loc[summary["stage2_classification"] == "Nominal", source], errors="coerce"
+        ).dropna()
+        if values.empty:
+            return None
+        baseline = float(values.map(lambda number: scale_to_um(number, source)).median())
+        return baseline * 2 if convert_radius_to_diameter else baseline
 
     st.divider(); st.subheader(f"Selected strut {current}")
     radius, radius_source = metric_number(["median_cross_section_radius_um", "median_radius_um"])
@@ -435,14 +427,23 @@ def analysis(summary):
     length, length_source = metric_number(["length_um", "inventory_length_um", "length_um_from_centerline"])
     length = scale_to_um(length, length_source)
     status, status_detail, tone = material_status(selected)
-    secondary = str(selected.get("secondary_defects", "")).replace(";", ", ") or "None reported"
+    secondary_raw = selected.get("secondary_defects", "")
+    secondary = (
+        "Not Listed"
+        if pd.isna(secondary_raw) or str(secondary_raw).strip().casefold() in {"", "nan", "none", "null", "<na>"}
+        else str(secondary_raw).replace(";", ", ")
+    )
+    nominal_length = nominal_median(["length_um", "inventory_length_um", "length_um_from_centerline"])
+    nominal_diameter = nominal_median(
+        ["median_cross_section_radius_um", "median_radius_um"], convert_radius_to_diameter=True
+    )
     current_review = reviews.get(int(current), {}).get("decision", "No final decision")
     cards = st.columns(5)
     with cards[0]: status_card("Material status", status, status_detail, tone)
     with cards[1]: status_card("Primary defect", primary_label(selected), "Geometry screening classification.", "warning" if primary_label(selected) != "No detected geometry defect" else "present")
     with cards[2]: status_card("Secondary defects", secondary, "Additional concurrent defect signals.")
-    with cards[3]: status_card("Length", fmt(length, 1, "µm"), "Registered centerline length.")
-    with cards[4]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 1, "µm"), "Twice the median cross-sectional radius.")
+    with cards[3]: status_card("Length", fmt(length, 2, "µm"), f"All nominal struts median: {fmt(nominal_length, 2, 'µm')}")
+    with cards[4]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 2, "µm"), f"All nominal struts median: {fmt(nominal_diameter, 2, 'µm')}")
 
     st.subheader("Linked 3-D inspection")
     viewer_ready, viewer_message = viewer_status()
@@ -498,11 +499,48 @@ def analysis(summary):
         st.markdown("**Technical data**")
         st.json(selected.to_dict())
         st.dataframe(stations.drop(columns=["__position_pct"], errors="ignore"), hide_index=True, width='stretch')
-    st.markdown("**Chat context**"); st.caption(f"Questions use FastAPI-backed values for selected strut {current}.")
+    st.markdown("**Chat context**"); st.caption(f"Questions use FastAPI-backed values for selected strut {current}. Suggested prompts fill the editable message box.")
     use_gemini = st.toggle("Use Gemini for open-ended questions", value=False, key="use_gemini_chat")
     for message in st.session_state.get("chat_messages", []):
         with st.chat_message(message["role"]): st.markdown(message["content"])
-    question = st.chat_input(f"Ask about strut {current} or the defect summary")
+    defect_categories = sorted(
+        {
+            str(category) for category in summary["primary_defect"].dropna()
+            if str(category).strip().casefold() not in {"", "nominal", "nan", "unknown"}
+        },
+        key=str.casefold,
+    )
+    suggested_prompts = {
+        "Current strut": [
+            ("Inspect this strut", f"Inspect strut {current}"),
+            ("Largest deviation", f"Where is the largest deviation on strut {current}?"),
+            ("Lowest occupancy", f"What is the lowest occupancy on strut {current}?"),
+        ],
+        "Compare / select": [
+            ("Compare with nominal", f"Compare strut {current} with all nominal struts"),
+            ("Review candidates", "List struts needing review"),
+            ("Rank deviations", "Show the top 10 struts by maximum deviation"),
+        ],
+        "Dataset overview": [
+            ("Defect summary", "Give me a defect summary"),
+            ("Explain occupancy", "What does material occupancy mean?"),
+            ("Explain Stage 2", "What is Stage 2 classification?"),
+        ],
+        "Inspect by defect": [
+            (f"All {category}", f"Inspect all struts with primary defect {category}")
+            for category in defect_categories
+        ],
+    }
+    def set_chat_draft(prompt: str) -> None:
+        st.session_state.chat_draft = prompt
+    st.caption("Suggested prompts")
+    prompt_groups = st.columns(len(suggested_prompts))
+    for panel, (group, prompts) in zip(prompt_groups, suggested_prompts.items()):
+        with panel:
+            st.markdown(f"*{group}*")
+            for label, prompt in prompts:
+                st.button(label, key=f"chat_prompt_{group}_{label}_{current}", width="stretch", on_click=set_chat_draft, args=(prompt,))
+    question = st.chat_input(f"Ask about strut {current}, selected struts, or the dataset", key="chat_draft")
     if question:
         messages = st.session_state.setdefault("chat_messages", [])
         messages.append({"role": "user", "content": question})
@@ -527,7 +565,7 @@ def analysis(summary):
 
 st.markdown("""
 <style>
-.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
+.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card,.defect-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.defect-card{border-left:4px solid #f97316;height:100%}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
 [data-testid="stSidebar"] [data-testid="stButton"] button{justify-content:flex-start;border-radius:7px;font-weight:600;min-height:42px;margin:2px 0}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]{background:transparent;border-color:transparent;color:#e5e7eb}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover{background:#1f2937;border-color:transparent;color:#fff}

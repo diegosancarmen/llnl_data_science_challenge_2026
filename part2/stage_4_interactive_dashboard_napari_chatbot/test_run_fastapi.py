@@ -9,6 +9,7 @@ from time import perf_counter
 from fastapi import HTTPException
 
 from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import (
+    _chat_format_metric,
     _chat_response,
     current_state,
     publish_active_strut,
@@ -57,7 +58,21 @@ class ChatListingTests(unittest.TestCase):
         response = _chat_response("Where is the largest deviation?", active_strut_id=strut_id)
 
         self.assertEqual(response["strut_id"], strut_id)
-        self.assertIn("position_fraction", response["reply"])
+        self.assertIn("position fraction", response["reply"])
+
+    def test_chat_measurements_use_two_decimal_places(self):
+        self.assertEqual(_chat_format_metric(3225.5712106704714, "length"), "3,225.57 µm")
+        self.assertEqual(_chat_format_metric(0.6043185424804688, "occupancy"), "60.43 %")
+
+    def test_single_strut_summary_is_labeled_and_rounded(self):
+        strut_id = int(store.defect_by_strut.iloc[0]["strut_id"])
+        response = _chat_response(f"Inspect strut {strut_id}")
+
+        self.assertEqual(response["result_type"], "strut_summary")
+        self.assertTrue(response["reply"].startswith(f"### Strut {strut_id}"))
+        self.assertIn("**Length:**", response["reply"])
+        self.assertIn("**Median diameter:**", response["reply"])
+        self.assertNotIn("**secondary defects:** nan", response["reply"].casefold())
 
     def test_explicit_strut_list_selects_each_valid_id(self):
         strut_ids = store.defect_by_strut.iloc[:4]["strut_id"].astype(int).tolist()
@@ -169,6 +184,41 @@ class ChatListingTests(unittest.TestCase):
             {"Missing_Intentional": 87, "Missing_Unintentional": 331},
         )
         self.assertIn("Please specify", response["reply"])
+
+    def test_chat_explains_known_data_terms(self):
+        response = _chat_response("What does material occupancy mean?")
+
+        self.assertEqual(response["result_type"], "glossary")
+        self.assertIn("sampled fraction", response["reply"])
+
+    def test_chat_compares_current_strut_with_nominal_baseline(self):
+        strut_id = int(store.defect_by_strut.iloc[0]["strut_id"])
+        response = _chat_response("Compare this strut with all nominal struts", active_strut_id=strut_id)
+
+        self.assertEqual(response["result_type"], "comparison")
+        self.assertEqual(response["strut_ids"], [strut_id])
+        self.assertIn("nominal_median", next(iter(response["comparison"].values())))
+
+    def test_chat_ranks_and_selects_requested_struts(self):
+        response = _chat_response("Show the top 3 struts by maximum deviation")
+
+        self.assertEqual(response["result_type"], "ranking")
+        self.assertEqual(len(response["strut_ids"]), 3)
+        self.assertEqual(response["select_strut_ids"], response["strut_ids"])
+
+    def test_chat_summarizes_multiple_explicit_struts(self):
+        strut_ids = store.defect_by_strut.iloc[:2]["strut_id"].astype(int).tolist()
+        response = _chat_response("Inspect struts " + ", ".join(map(str, strut_ids)))
+
+        self.assertEqual(response["result_type"], "multi_strut_summary")
+        self.assertEqual(response["strut_ids"], strut_ids)
+        self.assertEqual(response["total"], len(strut_ids))
+
+    def test_chat_reports_unknown_explicit_strut(self):
+        response = _chat_response("Inspect strut 999999999")
+
+        self.assertEqual(response["result_type"], "unknown_strut")
+        self.assertIn("loaded dataset", response["reply"])
 
 
 if __name__ == "__main__":

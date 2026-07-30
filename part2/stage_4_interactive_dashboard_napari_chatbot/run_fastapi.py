@@ -503,6 +503,125 @@ def _chat_filter(
     return frame
 
 
+CHAT_METRICS: Dict[str, Dict[str, Any]] = {
+    "length": {"column": "length_um", "label": "length", "unit": "µm", "aliases": ("length",)},
+    "occupancy": {"column": "sampled_occupancy", "label": "material occupancy", "unit": "%", "percent": True, "aliases": ("occupancy", "material fraction")},
+    "median_radius": {"column": "median_cross_section_radius_um", "label": "median radius", "unit": "µm", "aliases": ("median radius", "radius")},
+    "median_diameter": {"column": "median_cross_section_radius_um", "label": "median diameter", "unit": "µm", "multiplier": 2, "aliases": ("diameter",)},
+    "max_deviation": {"column": "max_centerline_offset_um", "label": "maximum centerline offset", "unit": "µm", "aliases": ("maximum deviation", "max deviation", "largest deviation", "centerline offset", "offset", "deviation")},
+    "rms_deviation": {"column": "rms_centerline_offset_um", "label": "RMS centerline offset", "unit": "µm", "aliases": ("rms deviation", "rms offset")},
+    "outside_nominal": {"column": "median_outside_nominal_fraction", "label": "median outside-nominal material", "unit": "%", "percent": True, "aliases": ("outside nominal", "excess material")},
+    "intensity": {"column": "sampled_mean_intensity", "label": "mean CT intensity", "unit": "a.u.", "aliases": ("intensity",)},
+    "confidence": {"column": "confidence", "label": "confidence", "unit": "", "aliases": ("confidence",)},
+    "missing_score": {"column": "missing_score", "label": "missing score", "unit": "", "aliases": ("missing score",)},
+    "broken_score": {"column": "broken_score", "label": "broken score", "unit": "", "aliases": ("broken score",)},
+    "thin_score": {"column": "thin_score", "label": "thin score", "unit": "", "aliases": ("thin score",)},
+    "inflated_score": {"column": "inflated_score", "label": "inflated score", "unit": "", "aliases": ("inflated score",)},
+    "bend_score": {"column": "bend_score", "label": "bend score", "unit": "", "aliases": ("bend score",)},
+}
+
+CHAT_GLOSSARY = {
+    "stage 2 classification": "Stage 2 classification describes whether material is nominally present, intentionally missing, unexpectedly missing, or unexpectedly present relative to CAD.",
+    "primary defect": "Primary defect is the dominant automated geometry-defect label assigned to a strut. Secondary defects record additional concurrent signals.",
+    "needs review": "Needs review is an automated flag indicating that a strut should receive human inspection; it is not a final review decision.",
+    "material occupancy": "Material occupancy is the sampled fraction of the expected strut region containing CT material. It is reported as a percentage.",
+    "centerline offset": "Centerline offset is the distance between the measured and expected centerline at a station, reported in µm.",
+    "outside nominal": "Outside-nominal material is measured material outside the expected strut region; it is reported as a percentage.",
+    "station": "A station is a sampled position along a strut. Station records contain local occupancy, equivalent radius, centerline offset, intensity, and outside-nominal material.",
+}
+
+
+def _chat_summary_frame() -> pd.DataFrame:
+    """Return the summary table used for deterministic aggregate answers."""
+    return store.dashboard_summary.copy()
+
+
+def _chat_metric_key(lower: str) -> Optional[str]:
+    for metric, spec in CHAT_METRICS.items():
+        if any(alias in lower for alias in spec["aliases"]):
+            return metric
+    return None
+
+
+def _chat_metric_values(frame: pd.DataFrame, metric: str) -> pd.Series:
+    spec = CHAT_METRICS[metric]
+    if spec["column"] not in frame:
+        return pd.Series(dtype=float)
+    values = pd.to_numeric(frame[spec["column"]], errors="coerce")
+    return values * spec.get("multiplier", 1)
+
+
+def _chat_format_metric(value: float, metric: str) -> str:
+    spec = CHAT_METRICS[metric]
+    if spec.get("percent"):
+        value = value * 100 if abs(value) <= 1 else value
+    return f"{value:,.2f}{spec['unit'] and ' ' + spec['unit']}"
+
+
+def _chat_format_optional_metric(value: Any, metric: str) -> str:
+    """Render a nullable numeric chat field with the shared two-decimal rule."""
+    numeric = pd.to_numeric(value, errors="coerce")
+    return "N/A" if pd.isna(numeric) else _chat_format_metric(float(numeric), metric)
+
+
+def _chat_secondary_defects(value: Any) -> str:
+    """Return a human-readable secondary-defect value from CSV-backed data."""
+    text = "" if value is None else str(value).strip()
+    return "Not Listed" if text.casefold() in {"", "nan", "none", "null", "<na>"} else text.replace(";", ", ")
+
+
+def _chat_raw_explicit_ids(text: str) -> List[int]:
+    """Extract mentioned IDs without mistaking ranking sizes such as 'top 10' for a strut ID."""
+    matches = re.findall(r"\b(?:strut(?:s)?|inspect|compare|select)\s+([\d,\sand]+)", text.casefold())
+    values = [int(value) for match in matches for value in re.findall(r"\d+", match)]
+    return list(dict.fromkeys(values))
+
+
+def _chat_explicit_ids(text: str) -> List[int]:
+    return [value for value in _chat_raw_explicit_ids(text) if str(value) in store.strut_keys]
+
+
+def _chat_context_ids(message: str, active_strut_id: Optional[int]) -> List[int]:
+    explicit = _chat_explicit_ids(message)
+    if explicit:
+        return explicit
+    lower = message.casefold()
+    if any(token in lower for token in ("selected struts", "these struts", "those struts", "selection", "compare them")):
+        return list(current_state.active_strut_ids)
+    if active_strut_id is not None and str(active_strut_id) in store.strut_keys:
+        return [int(active_strut_id)]
+    return [current_state.active_strut_id] if current_state.active_strut_id is not None else []
+
+
+def _chat_station_extreme(strut_id: int, lower: str) -> Optional[Dict[str, Any]]:
+    detail = store.strut_detail(strut_id)
+    stations = pd.DataFrame(detail["stations"])
+    choices = (
+        (("occupancy", "low material"), "material_occupancy", "lowest", "material occupancy", "%", True),
+        (("radius", "diameter"), "equivalent_radius_um", "highest" if any(word in lower for word in ("largest", "highest", "maximum")) else "lowest", "equivalent radius", "µm", False),
+        (("outside nominal", "excess material"), "outside_nominal_fraction", "highest", "outside-nominal material", "%", True),
+        (("deviation", "offset"), "centroid_offset_um", "highest", "centerline offset", "µm", False),
+    )
+    for terms, column, direction, label, unit, percent in choices:
+        if not any(term in lower for term in terms) or column not in stations:
+            continue
+        values = pd.to_numeric(stations[column], errors="coerce")
+        values = values.dropna()
+        if values.empty:
+            return None
+        index = values.idxmin() if direction == "lowest" else values.idxmax()
+        value = float(values.loc[index])
+        shown = value * 100 if percent and abs(value) <= 1 else value
+        position = pd.to_numeric(stations.loc[index].get("position_fraction"), errors="coerce")
+        position_text = f" at position fraction {float(position):.2f} ({float(position) * 100:.2f}% along the strut)" if pd.notna(position) else ""
+        return {
+            "reply": f"For strut {strut_id}, the {direction} {label} is {shown:,.2f} {unit}{position_text}.",
+            "result_type": "station_extreme", "strut_id": strut_id, "metric": column,
+            "value": value, "position_fraction": _json_value(position), "references": [f"/struts/{strut_id}/stations"],
+        }
+    return None
+
+
 def _gemini_chat_call(question: str, active_strut_id: Optional[int], chat_history: List[Dict[str, str]]) -> tuple[str, List[int] | None]:
     """Run Gemini with fixed CSV-analysis and selection tools only."""
     from google import genai
@@ -608,14 +727,121 @@ async def chat(request: ChatRequest):
         # can republish its stale, single selected ID and erase a chat-driven
         # multi-selection before the visualizer receives it.
         selection = await publish_selection(selected_ids)
-    return {"message_id": str(uuid4()), **result, "selection": selection}
+    return {
+        "message_id": str(uuid4()), **result, "selection": selection,
+        "selection_changed": selection is not None,
+        "matched_count": result.get("total", result.get("count")),
+    }
 
 
 def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[str, Any]:
     text = message.strip()
     lower = text.casefold()
     normalized_text = re.sub(r"[\s_-]+", "", lower)
-    ids = [int(value) for value in re.findall(r"\b(?:strut\s*)?(\d+)\b", lower)]
+    for phrase, explanation in CHAT_GLOSSARY.items():
+        if phrase in lower and any(token in lower for token in ("what is", "what does", "explain", "meaning", "define")):
+            return {"reply": explanation, "result_type": "glossary", "topic": phrase, "references": ["summary"]}
+
+    ids = _chat_context_ids(text, active_strut_id)
+    explicit_ids = _chat_explicit_ids(text)
+    raw_explicit_ids = _chat_raw_explicit_ids(text)
+    if raw_explicit_ids and not explicit_ids:
+        return {
+            "reply": f"None of the requested strut IDs are in the loaded dataset: {', '.join(map(str, raw_explicit_ids))}.",
+            "result_type": "unknown_strut", "references": [],
+        }
+    if any(token in lower for token in ("inspect", "detail", "information", "summarize")) and len(ids) > 1:
+        frame = _chat_summary_frame()
+        selected = frame[frame["strut_id"].astype(int).isin(ids)]
+        columns = ["strut_id", "stage2_classification", "primary_defect", "needs_review"]
+        metric = _chat_metric_key(lower)
+        if metric and CHAT_METRICS[metric]["column"] in selected:
+            selected = selected.assign(__metric=_chat_metric_values(selected, metric))
+            columns.append("__metric")
+        preview = selected[columns].head(20).to_dict(orient="records")
+        return {
+            "reply": f"Inspection summary for {len(selected)} selected struts. Showing the first {len(preview)} records.",
+            "result_type": "multi_strut_summary", "strut_ids": ids, "total": len(selected), "items": _records(pd.DataFrame(preview)),
+            "references": [f"/struts/{strut_id}" for strut_id in ids[:20]],
+        }
+
+    if "compare" in lower:
+        subject_ids = ids
+        if not subject_ids:
+            return {"reply": "Select or name at least one strut to compare with all nominal struts.", "result_type": "comparison", "references": []}
+        frame = _chat_summary_frame()
+        subject = frame[frame["strut_id"].astype(int).isin(subject_ids)]
+        baseline = frame[frame["stage2_classification"].astype(str) == "Nominal"]
+        metric_keys = [_chat_metric_key(lower)] if _chat_metric_key(lower) else ["length", "median_diameter", "occupancy", "max_deviation"]
+        comparison = {}
+        for metric in metric_keys:
+            if metric is None:
+                continue
+            subject_values = _chat_metric_values(subject, metric).dropna()
+            baseline_values = _chat_metric_values(baseline, metric).dropna()
+            if not subject_values.empty and not baseline_values.empty:
+                comparison[metric] = {
+                    "selected_median": float(subject_values.median()),
+                    "nominal_median": float(baseline_values.median()),
+                }
+        if not comparison:
+            return {"reply": "The requested comparison metric is not available for the selected struts and nominal baseline.", "result_type": "comparison", "references": ["summary"]}
+        clauses = [
+            f"{CHAT_METRICS[metric]['label']}: selected median {_chat_format_metric(values['selected_median'], metric)} vs nominal median {_chat_format_metric(values['nominal_median'], metric)}"
+            for metric, values in comparison.items()
+        ]
+        return {
+            "reply": f"Comparison for {len(subject)} strut(s) against all nominal struts — " + "; ".join(clauses) + ".",
+            "result_type": "comparison", "strut_ids": subject_ids, "comparison": comparison, "references": ["summary"],
+        }
+
+    rank_match = re.search(r"\b(top|bottom|highest|lowest|largest|smallest)\s+(\d+)?", lower)
+    metric = _chat_metric_key(lower)
+    is_rank_request = bool(rank_match and (rank_match.group(1) in {"top", "bottom"} or rank_match.group(2) or "struts" in lower))
+    if is_rank_request and metric:
+        direction, count_text = rank_match.groups()
+        count = min(int(count_text or 10), 100)
+        frame = _chat_summary_frame().assign(__metric=_chat_metric_values(_chat_summary_frame(), metric)).dropna(subset=["__metric"])
+        ascending = direction in {"bottom", "lowest", "smallest"}
+        ranked = frame.sort_values(["__metric", "strut_id"], ascending=[ascending, True]).head(count)
+        ranked_ids = ranked["strut_id"].astype(int).tolist()
+        return {
+            "reply": f"The {direction} {len(ranked_ids)} struts by {CHAT_METRICS[metric]['label']} are {', '.join(map(str, ranked_ids))}.",
+            "result_type": "ranking", "metric": metric, "total": len(ranked_ids), "strut_ids": ranked_ids,
+            "select_strut_ids": ranked_ids, "references": ["summary"],
+        }
+
+    if ids and any(word in lower for word in ("station", "deviation", "offset", "occupancy", "radius", "diameter", "outside nominal", "excess material")):
+        station_result = _chat_station_extreme(ids[0], lower)
+        if station_result is not None:
+            return station_result
+
+    if ids and any(word in lower for word in ("inspect", "detail", "information", "summarize", "this strut", "active strut")):
+        detail = store.strut_detail(ids[0])
+        strut = detail["strut"]
+        defect_summary = strut.get("defect_summary", {})
+        length = strut.get("length_um")
+        radius = defect_summary.get("median_cross_section_radius_um")
+        numeric_radius = pd.to_numeric(radius, errors="coerce")
+        diameter = None if pd.isna(numeric_radius) else float(numeric_radius) * 2
+        needs_review = strut.get("needs_review")
+        review_text = "Yes" if str(needs_review).strip().casefold() in {"true", "1", "yes"} else "No" if str(needs_review).strip().casefold() in {"false", "0", "no"} else str(needs_review)
+        return {
+            "reply": "\n".join((
+                f"### Strut {ids[0]}",
+                f"- **Material status:** {strut.get('classification', 'Unknown')}",
+                f"- **Primary defect:** {strut.get('primary_defect', 'Unknown')}",
+                f"- **Secondary defects:** {_chat_secondary_defects(defect_summary.get('secondary_defects'))}",
+                f"- **Needs review:** {review_text}",
+                f"- **Length:** {_chat_format_optional_metric(length, 'length')}",
+                f"- **Median diameter:** {_chat_format_optional_metric(diameter, 'median_diameter')}",
+                f"- **Station measurements:** {len(detail['stations']):,}",
+            )),
+            "result_type": "strut_summary", "strut": detail,
+            "references": [f"struts/{ids[0]}", f"struts/{ids[0]}/stations"],
+        }
+
+    ids = explicit_ids
     if "select" in lower and ids:
         valid = [value for value in ids if str(value) in store.strut_keys]
         if valid:
@@ -655,7 +881,7 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
                     return {
                         "reply": (
                             f"For strut {requested_strut_id}, the largest uploaded centerline offset is "
-                            f"{float(offsets.loc[max_index]):g} at position_fraction {float(position):.4g}."
+                            f"{float(offsets.loc[max_index]):,.2f} µm at position fraction {float(position):.2f}."
                         ),
                         "strut_id": requested_strut_id,
                         "max_offset_value": float(offsets.loc[max_index]),
@@ -763,6 +989,17 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
             "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
         }
 
+    if category_value and ("how many" in lower or "count" in lower or "summary" in lower):
+        frame = store.defect_by_strut[
+            store.defect_by_strut[category_field].astype(str).str.casefold() == category_value.casefold()
+        ]
+        label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
+        return {
+            "reply": f"There are {len(frame)} struts with {label} {category_value}.",
+            "result_type": "category_count", "field": category_field, "value": category_value, "count": len(frame),
+            "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
+        }
+
     if requested_defect and ("how many" in lower or "count" in lower or "summary" in lower):
         count = int((store.defect_by_strut["primary_defect"].astype(str) == requested_defect).sum())
         selected_ids = store.defect_by_strut.loc[
@@ -789,7 +1026,13 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         }
 
     return {
-        "reply": "I can summarize defects, inspect a strut or its stations, list review candidates, and select struts.",
+        "reply": (
+            "I can inspect the active or named strut, compare struts with the nominal baseline, "
+            "find station extremes, list/select defect or review groups, rank struts by a measurement, "
+            "summarize the dataset, and explain inspection fields. Try: 'Inspect strut 42', "
+            "'Compare this strut with all nominal struts', or 'Show the top 10 struts by maximum deviation'."
+        ),
+        "result_type": "help",
         "references": [],
     }
 
