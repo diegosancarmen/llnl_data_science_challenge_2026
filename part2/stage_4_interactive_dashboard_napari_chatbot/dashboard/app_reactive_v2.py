@@ -108,16 +108,16 @@ def save_review(strut_id: int, decision: str) -> None:
 
 
 def material_status(row: pd.Series) -> tuple[str, str, str]:
-    classification = str(row.get("stage2_classification", "Unknown"))
-    if classification == "Nominal":
-        return "Present by design", "Material is expected at this CAD strut.", "present"
-    if classification == "Missing_Intentional":
-        return "Missing by Design", "CAD intentionally expects no material at this strut.", "missing"
-    if classification == "Missing_Unintentional":
-        return "Missing by Accident", "CAD expects material, but this strut is missing.", "missing"
-    if classification == "Expected_Missing_But_Material_Present":
-        return "Unexpected material", "Material is present where CAD expects the strut to be absent.", "warning"
-    return classification.replace("_", " "), "No material-status interpretation is available.", "neutral"
+    category = strut_category(row)
+    details = {
+        "Present by Design — No defects": ("Material is expected at this CAD strut; no primary geometry defect detected.", "present"),
+        "Present by Design — Defect present": ("Material is expected at this CAD strut; a primary geometry defect was detected.", "warning"),
+        "Missing by Design": ("CAD intentionally expects no material at this strut.", "missing"),
+        "Missing by Accident": ("CAD expects material, but this strut is missing.", "missing"),
+        "Unexpected material": ("Material is present where CAD expects the strut to be absent.", "warning"),
+    }
+    detail, tone = details[category]
+    return category, detail, tone
 
 
 DISPLAY_CLASSIFICATION_NAMES = {
@@ -135,6 +135,34 @@ def primary_label(row: pd.Series) -> str:
     return "No detected geometry defect" if value in {"", "Nominal", "nan"} else value
 
 
+NO_DEFECT_LABELS = {
+    "", "nominal", "nan", "unknown", "none", "null", "no detected geometry defect",
+    "missing_intentional", "missing_unintentional",
+}
+TOP_LEVEL_CATEGORIES = [
+    "Present by Design — No defects",
+    "Present by Design — Defect present",
+    "Missing by Design",
+    "Missing by Accident",
+    "Unexpected material",
+]
+
+
+def has_primary_defect(row: pd.Series) -> bool:
+    return str(row.get("primary_defect", "Nominal")).strip().casefold() not in NO_DEFECT_LABELS
+
+
+def strut_category(row: pd.Series) -> str:
+    classification = str(row.get("stage2_classification", "Unknown")).strip()
+    if classification == "Nominal":
+        return "Present by Design — Defect present" if has_primary_defect(row) else "Present by Design — No defects"
+    if classification == "Missing_Intentional":
+        return "Missing by Design"
+    if classification == "Missing_Unintentional":
+        return "Missing by Accident"
+    return "Unexpected material"
+
+
 def status_card(label: str, value: str, detail: str, tone: str = "neutral") -> None:
     st.markdown(
         f'<div class="status-card status-{tone}"><div class="status-label">{escape(label)}</div>'
@@ -143,92 +171,25 @@ def status_card(label: str, value: str, detail: str, tone: str = "neutral") -> N
     )
 
 
-def defect_count_card(label: str, count: int, percent: float, intensity: float) -> None:
-    """Render one compact card for the horizontal defect-category row."""
+def category_count_card(label: str, count: int, percent: float, detail: str, intensity: float, tone: str = "neutral") -> None:
+    """Render one category card using the all-strut denominator."""
     lightness = 72 - (27 * intensity)
     color = f"hsl(25, 92%, {lightness:.0f}%)"
+    percent_text = "<0.01%" if count and percent < 0.01 else f"{percent:.1f}%"
     st.markdown(
-        f'<div class="defect-card" style="border-left-color:{color}"><div class="status-label">{escape(label)}</div>'
-        f'<div class="status-value">{count:,}</div><div class="status-detail">{percent:.1f}% of defects</div></div>',
+        f'<div class="category-card category-{tone}" style="border-left-color:{color}"><div class="status-label">{escape(label)}</div>'
+        f'<div class="status-value">{count:,}</div><div class="status-detail">{escape(percent_text)} of all struts — {escape(detail)}</div></div>',
         unsafe_allow_html=True,
     )
 
 
 def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str, Any]]) -> None:
+    """Render mutually exclusive top-level categories plus overlapping defect details."""
     frame = summary.copy()
-    frame["__material_status"] = frame.apply(lambda row: material_status(row)[0], axis=1)
+    frame["__category"] = frame.apply(strut_category, axis=1)
     frame["__primary_label"] = frame.apply(primary_label, axis=1)
-    missing = frame["__material_status"] == "Missing by Design"
-    frame.loc[missing, "__primary_label"] = frame.loc[missing, "stage2_classification"].map(display_classification)
-
-    material_labels = ["Present by design", "Missing by Design", "Missing by Accident", "Unexpected material"]
-    material_counts = frame["__material_status"].value_counts().reindex(material_labels, fill_value=0)
     total_struts = len(frame)
-    nominal_count = int(material_counts.iloc[0])
-    other_count = int(material_counts.iloc[1:].sum())
-    log_floor = 0.1
-
-    def share_text(count: int) -> str:
-        share = (count / total_struts * 100) if total_struts else 0
-        return "<0.01%" if count > 0 and share < 0.01 else f"{share:.1f}%"
-
-    material_bars = make_subplots(
-        rows=1, cols=2, column_widths=[0.42, 0.58], horizontal_spacing=0.18,
-        subplot_titles=("All Struts", "Other struts (magnified)"),
-    )
-    for label, count, color in (
-        ("Present by design", nominal_count, "#22c55e"),
-        ("Other", other_count, "#64748b"),
-    ):
-        plotted_count = max(count, log_floor)
-        material_bars.add_bar(
-            x=["All Struts"], y=[plotted_count], name=label, marker_color=color,
-            text=[f"{count:,}<br>{share_text(count)}"],
-            textposition="inside",
-            customdata=[[count, share_text(count)]],
-            hovertemplate=f"{label}<br>%{{customdata[0]:,}} struts<br>%{{customdata[1]}} of all struts<extra></extra>",
-            row=1, col=1,
-        )
-    for label, count, color in zip(material_labels[1:], material_counts.iloc[1:].astype(int), ["#ef4444", "#a855f7", "#0ea5e9"]):
-        plotted_count = max(int(count), log_floor)
-        material_bars.add_bar(
-            x=["Other struts"], y=[plotted_count], name=label, marker_color=color,
-            text=[f"{count:,}<br>{share_text(int(count))}"],
-            textposition="inside",
-            customdata=[[int(count), share_text(int(count))]],
-            hovertemplate=f"{label}<br>%{{customdata[0]:,}} struts<br>%{{customdata[1]}} of all struts<extra></extra>",
-            row=1, col=2,
-        )
-    # Connector positions are normalized in log space so the callout remains
-    # visually aligned after tiny categories are made visible.
-    def log_position(value: float, maximum: float) -> float:
-        upper = max(maximum, log_floor) * 1.16
-        return (np.log10(max(value, log_floor)) - np.log10(log_floor)) / (np.log10(upper) - np.log10(log_floor))
-
-    other_bottom = log_position(nominal_count, total_struts)
-    other_top = log_position(total_struts, total_struts)
-    breakout_top = log_position(other_count, other_count)
-    material_bars.add_shape(
-        type="line", xref="paper", yref="paper", x0=0.36, y0=other_bottom, x1=0.50, y1=0,
-        line={"color": "#fbbf24", "width": 1.5, "dash": "dot"},
-    )
-    material_bars.add_shape(
-        type="line", xref="paper", yref="paper", x0=0.36, y0=other_top, x1=0.50, y1=breakout_top,
-        line={"color": "#fbbf24", "width": 1.5, "dash": "dot"},
-    )
-    material_bars.add_annotation(
-        x=0.43, y=min(0.94, max(0.06, (other_bottom + other_top) / 2)), xref="paper", yref="paper",
-        text="<b>Zoom</b><br>Other", showarrow=False, font={"size": 11, "color": "#fbbf24"}, align="center",
-    )
-    material_bars.update_yaxes(type="log", title_text="Strut count (log scale)", row=1, col=1)
-    material_bars.update_yaxes(type="log", title_text="Strut count (log scale)", row=1, col=2)
-    material_bars.update_layout(
-        barmode="stack", height=335, showlegend=True, legend={"orientation": "h", "y": -0.20},
-        margin=dict(l=10, r=10, t=62, b=70), title=f"Material status — {total_struts:,} struts",
-    )
-
-    defect_frame = frame[frame["__primary_label"] != "No detected geometry defect"]
-    defect_counts = defect_frame["__primary_label"].value_counts().sort_values(ascending=False)
+    counts = frame["__category"].value_counts().reindex(TOP_LEVEL_CATEGORIES, fill_value=0)
 
     automated_review = frame["needs_review"].map(truthy)
     unresolved = int(sum(automated_review & ~frame["strut_id"].astype(int).isin(reviews)))
@@ -246,25 +207,51 @@ def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str,
         "strut_id",
     ].astype(int))
     final_nominal = len(saved_nominal_ids | unflagged_nominal_ids)
+
     content_col, queue_col = st.columns([4.0, 1.0])
     with content_col:
-        st.plotly_chart(chart(material_bars, 335), width='stretch')
-        st.markdown("### Defect-bearing struts")
+        st.markdown("### Strut categories")
+        details = [
+            "Expected material with no primary defect.",
+            "Expected material with a primary defect.",
+            "CAD intentionally has no material.",
+            "Expected material is absent.",
+            "Material exists outside the expected design.",
+        ]
+        tones = ["present", "warning", "missing", "missing", "warning"]
+        columns = st.columns(3)
+        maximum = max(int(counts.max()), 1)
+        for index, label in enumerate(TOP_LEVEL_CATEGORIES):
+            count = int(counts[label])
+            with columns[index % len(columns)]:
+                category_count_card(
+                    label, count, count / total_struts * 100 if total_struts else 0,
+                    details[index], count / maximum, tones[index],
+                )
+
+        defect_frame = frame[
+            (frame["__category"] == "Present by Design — Defect present")
+            & frame["__primary_label"].str.strip().str.casefold().map(lambda value: value not in NO_DEFECT_LABELS)
+        ]
+        defect_counts = defect_frame["__primary_label"].value_counts().sort_values(ascending=False)
+        st.markdown("### Primary defect details")
         if defect_counts.empty:
             st.info("No geometry defects detected.")
         else:
-            minimum = int(defect_counts.min())
-            maximum = int(defect_counts.max())
-            defect_columns = st.columns(len(defect_counts))
-            for column, (label, count) in zip(defect_columns, defect_counts.items()):
-                intensity = 1.0 if maximum == minimum else (int(count) - minimum) / (maximum - minimum)
-                with column:
-                    defect_count_card(label, int(count), int(count) / len(defect_frame) * 100, intensity)
+            columns = st.columns(3)
+            maximum = max(int(defect_counts.max()), 1)
+            for index, (label, count) in enumerate(defect_counts.items()):
+                with columns[index % len(columns)]:
+                    category_count_card(
+                        f"Primary defect: {label}", int(count),
+                        int(count) / total_struts * 100 if total_struts else 0,
+                        "Intentional detail overlap with Defect present.", int(count) / maximum,
+                    )
     with queue_col:
         st.markdown("### Review queue")
         metric("Unresolved", f"{unresolved:,}", "Automated review flags without a final saved decision.")
         st.caption(f"Automated flags: {int(automated_review.sum()):,}")
-        st.caption(f"Final nominal: {final_nominal:,} / {total_struts:,} ({final_nominal / total_struts:.1%})")
+        st.caption(f"Final nominal: {final_nominal:,} / {total_struts:,} ({final_nominal / total_struts:.1%})" if total_struts else "Final nominal: 0 / 0")
         st.caption(f"Final needs review: {final_counts.get('needs_review', 0):,}")
         st.caption(f"Confirmed defect: {final_counts.get('confirmed_defect', 0):,}")
 
@@ -376,6 +363,7 @@ def analysis(summary):
         reviews = {}
         st.warning(f"Could not load saved review decisions: {exc}")
     render_statistics_banner(summary, reviews)
+    st.subheader("Strut ID selector")
     search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
     filtered = summary.copy()
     if search.strip():
@@ -597,7 +585,7 @@ def analysis(summary):
 
 st.markdown("""
 <style>
-.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card,.defect-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.defect-card{border-left:4px solid #f97316;height:100%}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
+.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card,.category-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.category-card{border-left:4px solid #f97316;height:100%;margin-bottom:10px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present,.category-present{border-left-color:#22c55e}.status-missing,.category-missing{border-left-color:#ef4444}.status-warning,.category-warning{border-left-color:#f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
 [data-testid="stSidebar"] [data-testid="stButton"] button{justify-content:flex-start;border-radius:7px;font-weight:600;min-height:42px;margin:2px 0}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]{background:transparent;border-color:transparent;color:#e5e7eb}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover{background:#1f2937;border-color:transparent;color:#fff}
