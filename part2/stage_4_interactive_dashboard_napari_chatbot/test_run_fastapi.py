@@ -175,6 +175,28 @@ class ChatListingTests(unittest.TestCase):
                 self.assertEqual(published["selection"]["strut_ids"], expected)
                 self.assertEqual(published["selection"]["active_strut_id"], expected[0])
 
+    def test_defect_selection_includes_a_triage_summary(self):
+        response = _chat_response("Inspect all struts with primary defect Bent")
+        expected = store.defect_by_strut[
+            store.defect_by_strut["primary_defect"].astype(str).str.casefold() == "bent"
+        ]
+        summary = response["category_summary"]
+
+        self.assertEqual(response["result_type"], "category_summary")
+        self.assertEqual(summary["count"], len(expected))
+        self.assertAlmostEqual(summary["dataset_share"], len(expected) / len(store.dashboard_summary))
+        self.assertEqual(
+            summary["needs_review_count"],
+            int(expected["needs_review"].astype(str).str.strip().str.casefold().isin({"true", "1", "yes"}).sum()),
+        )
+        self.assertEqual(
+            summary["stage2_classification_counts"],
+            expected["stage2_classification"].fillna("Unknown").astype(str).value_counts().sort_index().to_dict(),
+        )
+        self.assertEqual(set(summary["metrics"]), {"occupancy", "median_diameter", "max_deviation"})
+        self.assertIn("### Bent defect summary", response["reply"])
+        self.assertIn("Selected all", response["reply"])
+
     def test_count_question_does_not_change_selection(self):
         response = _chat_response("How many struts are bent?")
 

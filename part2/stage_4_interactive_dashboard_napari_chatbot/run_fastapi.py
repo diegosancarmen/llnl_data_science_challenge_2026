@@ -573,6 +573,75 @@ def _chat_format_optional_metric(value: Any, metric: str) -> str:
     return "N/A" if pd.isna(numeric) else _chat_format_metric(float(numeric), metric)
 
 
+def _chat_category_summary(frame: pd.DataFrame) -> Dict[str, Any]:
+    """Return a compact, JSON-safe triage summary for a selected category."""
+    total_struts = len(store.dashboard_summary)
+    category_count = len(frame)
+    review_values = frame.get("needs_review", pd.Series(index=frame.index, dtype=object))
+    needs_review_count = int(
+        review_values.astype(str).str.strip().str.casefold().isin({"true", "1", "yes"}).sum()
+    )
+    classification_column = (
+        "stage2_classification"
+        if "stage2_classification" in frame.columns
+        else "inventory_classification"
+    )
+    stage2_counts = (
+        frame[classification_column].fillna("Unknown").astype(str).value_counts().sort_index().to_dict()
+        if classification_column in frame.columns
+        else {}
+    )
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for metric in ("occupancy", "median_diameter", "max_deviation"):
+        values = _chat_metric_values(frame, metric).dropna()
+        if not values.empty:
+            metrics[metric] = {
+                "count": int(len(values)),
+                "median": float(values.median()),
+                "min": float(values.min()),
+                "max": float(values.max()),
+            }
+    return {
+        "count": category_count,
+        "dataset_share": category_count / total_struts if total_struts else 0.0,
+        "needs_review_count": needs_review_count,
+        "needs_review_share": needs_review_count / category_count if category_count else 0.0,
+        "stage2_classification_counts": _json_value(stage2_counts),
+        "metrics": metrics,
+    }
+
+
+def _chat_category_summary_reply(label: str, summary: Dict[str, Any]) -> str:
+    """Format the category triage summary for the chat transcript."""
+    stage2_counts = summary["stage2_classification_counts"]
+    stage2_text = ", ".join(
+        f"{_chat_display_category(category)}: {count:,}"
+        for category, count in stage2_counts.items()
+    ) or "Unavailable"
+    lines = [
+        f"### {label} defect summary",
+        (
+            f"- **Selected:** {summary['count']:,} struts "
+            f"({summary['dataset_share'] * 100:.2f}% of the dataset)"
+        ),
+        (
+            f"- **Needs review:** {summary['needs_review_count']:,} "
+            f"({summary['needs_review_share'] * 100:.2f}% of selected struts)"
+        ),
+        f"- **Stage 2 classification:** {stage2_text}",
+    ]
+    for metric, values in summary["metrics"].items():
+        formatted = ", ".join(
+            (
+                f"median {_chat_format_metric(values['median'], metric)}",
+                f"range {_chat_format_metric(values['min'], metric)}–{_chat_format_metric(values['max'], metric)}",
+            )
+        )
+        lines.append(f"- **{CHAT_METRICS[metric]['label'].capitalize()}:** {formatted}")
+    lines.append(f"Selected all {summary['count']:,} matching struts.")
+    return "\n".join(lines)
+
+
 def _chat_secondary_defects(value: Any) -> str:
     """Return a human-readable secondary-defect value from CSV-backed data."""
     text = "" if value is None else str(value).strip()
@@ -809,16 +878,16 @@ def _chat_response(message: str, active_strut_id: Optional[int] = None) -> Dict[
         strut_ids = [int(value) for value in frame["strut_id"].tolist()]
         label = "primary defect" if category_field == "primary_defect" else "Stage 2 classification"
         display_value = _chat_display_category(category_value)
+        category_summary = _chat_category_summary(frame)
         return {
-            "reply": (
-                f"There are {len(strut_ids)} struts with {label} {display_value}. "
-                + f"Selected all {len(strut_ids)} matching struts."
-            ),
+            "reply": _chat_category_summary_reply(display_value, category_summary),
+            "result_type": "category_summary",
             "select_strut_ids": strut_ids,
             "strut_ids": strut_ids,
             "total": len(strut_ids),
             "field": category_field,
             "value": category_value,
+            "category_summary": category_summary,
             "references": [f"/struts?{'primary_defect' if category_field == 'primary_defect' else 'classification'}={category_value}"],
         }
 

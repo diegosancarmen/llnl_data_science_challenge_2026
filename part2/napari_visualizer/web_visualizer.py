@@ -369,11 +369,16 @@ class WebStrutVisualizer:
         self.selected_ids = requested
         self._selection_state_update = True
         try:
-            self.state.strut_ids_input = ", ".join(requested)
-            self.state.selected_strut_options = [
-                {"title": strut_id, "value": strut_id} for strut_id in requested
-            ]
-            self.state.selected_strut_id = active_id
+            # Broker events arrive outside a browser UI callback.  Batch and
+            # flush their state changes so Trame immediately updates both the
+            # ID input and the active-ID selector in connected clients.
+            with self.state:
+                self.state.strut_ids_input = ", ".join(requested)
+                self.state.selected_strut_options = [
+                    {"title": strut_id, "value": strut_id} for strut_id in requested
+                ]
+                self.state.selected_strut_id = active_id
+            self.state.flush()
         finally:
             self._selection_state_update = False
         self._set_selection_status(f"{len(requested)} strut(s) selected")
