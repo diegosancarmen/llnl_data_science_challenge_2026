@@ -273,6 +273,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     active_strut_id: Optional[int] = None
     chat_history: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
+    provider: Literal["fastapi", "gemini"] = "fastapi"
+    # Kept for clients using the original toggle-based API.
     use_gemini: bool = False
 
 
@@ -332,7 +334,12 @@ def read_root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "data_loaded": True}
+    return {
+        "status": "ok",
+        "data_loaded": True,
+        "gemini_enabled": os.getenv("GEMINI_ENABLED", "false").casefold() in {"1", "true", "yes"},
+        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+    }
 
 
 @app.get("/frontend-config")
@@ -341,6 +348,8 @@ def frontend_config():
         "api_status": "ok",
         "websocket_path": "/ws",
         "capabilities": ["summary", "strut_listing", "strut_detail", "stations", "selection", "chat"],
+        "chat_providers": ["fastapi", "gemini"],
+        "gemini_enabled": os.getenv("GEMINI_ENABLED", "false").casefold() in {"1", "true", "yes"},
         "summary": store.summary(),
     }
 
@@ -580,9 +589,8 @@ def _gemini_chat_call(question: str, active_strut_id: Optional[int], chat_histor
 async def chat(request: ChatRequest):
     """HTTP chat endpoint for clients that do not maintain a WebSocket."""
     deterministic = _chat_response(request.message, request.active_strut_id)
-    if any(key in deterministic for key in ("count", "total", "strut_ids", "select_strut_ids", "strut")):
-        result = deterministic
-    elif request.use_gemini and os.getenv("GEMINI_ENABLED", "false").casefold() in {"1", "true", "yes"} and os.getenv("GEMINI_API_KEY"):
+    provider = "gemini" if request.use_gemini else request.provider
+    if provider == "gemini" and os.getenv("GEMINI_ENABLED", "false").casefold() in {"1", "true", "yes"} and os.getenv("GEMINI_API_KEY"):
         try:
             cache_key = json.dumps([request.message.casefold().strip(), request.active_strut_id, request.chat_history[-4:]], sort_keys=True)
             cached = _gemini_cache.get(cache_key)
@@ -593,13 +601,17 @@ async def chat(request: ChatRequest):
                     _gemini_chat_call, request.message, request.active_strut_id, request.chat_history[-4:]
                 )
                 _gemini_cache[cache_key] = (monotonic(), reply, selected_ids)
-            result = {"reply": reply, "select_strut_ids": selected_ids, "references": []}
+            result = {"reply": reply, "select_strut_ids": selected_ids, "references": [], "provider": "gemini"}
         except Exception as exc:
             logger.exception("Gemini chat failed; using deterministic fallback")
             result = _chat_response(request.message, request.active_strut_id)
             result["reply"] = f"Gemini was unavailable ({exc}); {result['reply']}"
+            result["provider"] = "fastapi-fallback"
+    elif provider == "gemini":
+        result = {"reply": "Gemini is not configured. Set GEMINI_ENABLED=true and GEMINI_API_KEY, then restart FastAPI.", "references": [], "provider": "gemini-unavailable"}
     else:
         result = deterministic
+        result["provider"] = "fastapi"
     selected_ids = result.pop("select_strut_ids", None)
     selection = None
     if selected_ids:

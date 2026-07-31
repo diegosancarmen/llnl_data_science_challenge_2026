@@ -104,3 +104,5 @@ python .\part2\stage_4_interactive_dashboard_napari_chatbot\run_agent_cli.py
 The chatbot talks directly to FastAPI and can answer defect-summary questions,
 inspect struts, and broadcast strut selections to the connected viewer and
 dashboard.
+
+Get-Process python | Stop-Process -Force      

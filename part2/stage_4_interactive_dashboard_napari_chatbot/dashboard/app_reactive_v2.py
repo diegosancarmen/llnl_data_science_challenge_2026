@@ -1,8 +1,10 @@
 """FastAPI-backed Streamlit defect-inspection dashboard with embedded PyVista views."""
 from __future__ import annotations
 
+import json
 import os
 from html import escape
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +20,12 @@ VIEWER_URL = os.getenv("PYVISTA_VIEWER_URL", "http://127.0.0.1:8081").rstrip("/"
 TIMEOUT = float(os.getenv("DASHBOARD_API_TIMEOUT", "30"))
 SUMMARY_TIMEOUT = float(os.getenv("DASHBOARD_SUMMARY_TIMEOUT", "30"))
 VIEWER_TIMEOUT = float(os.getenv("PYVISTA_VIEWER_TIMEOUT", "20"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PIPELINE_SUMMARY = REPO_ROOT / "part2" / "stage_3_defect_analysis" / "output" / "station_export_20260727T193004Z" / "defect_analysis_summary.json"
+INVENTORY_CANDIDATES = (
+    REPO_ROOT / "part2" / "stage_2a_developer_output" / "all_struts_inventory.csv",
+    REPO_ROOT / "part2" / "registration" / "alignment_check" / "stage2a_candidate_registration_output" / "all_struts_inventory.csv",
+)
 
 st.set_page_config(page_title="Lattice NDE Dashboard", layout="wide")
 
@@ -62,6 +70,36 @@ def metric(label, value, help_text=""):
     title = f' title="{help_text}"' if help_text else ""
     st.markdown(f'<div class="metric-card"{title}><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>', unsafe_allow_html=True)
 def series(df, aliases):    c = col(df, aliases); return c, pd.to_numeric(df[c], errors="coerce") if c else (None, None)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_pipeline_counts() -> dict[str, Any]:
+    """Load workflow counts from the generated Stage 2a/3 artifacts."""
+    counts = {"indexed": 0, "compared": 0, "defects": 0, "scan_shape": "volume dimensions unavailable", "stations": 21, "reference_population": 0}
+    try:
+        payload = json.loads(PIPELINE_SUMMARY.read_text(encoding="utf-8"))
+        counts["compared"] = int(payload.get("processed_struts", 0) or 0)
+        counts["indexed"] = counts["compared"]
+        counts["defects"] = sum(
+            int(value or 0)
+            for label, value in payload.get("primary_defect_counts", {}).items()
+            if str(label).casefold() != "nominal"
+        )
+        shape = payload.get("scan_shape")
+        if shape:
+            counts["scan_shape"] = " × ".join(f"{int(value):,}" for value in shape)
+        counts["stations"] = int(payload.get("parameters", {}).get("stations", 21) or 21)
+        counts["reference_population"] = int(payload.get("nominal_reference_population", 0) or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    for candidate in INVENTORY_CANDIDATES:
+        if candidate.exists():
+            try:
+                counts["indexed"] = max(counts["indexed"], int(pd.read_csv(candidate, usecols=[0]).shape[0]))
+            except (OSError, ValueError, pd.errors.ParserError):
+                pass
+            break
+    return counts
 
 
 def api_get(path: str, *, request_timeout: float = TIMEOUT, **params: Any) -> dict:
@@ -124,6 +162,34 @@ def primary_label(row: pd.Series) -> str:
     value = str(row.get("primary_defect", "Nominal"))
     return "No detected geometry defect" if value in {"", "Nominal", "nan"} else value
 
+
+def geometry_classification(row: pd.Series) -> tuple[str, str, str]:
+    """Return a plain-language geometry badge, explanation, and visual tone."""
+    raw = row.get("primary_defect", "Nominal")
+    value = "" if raw is None or pd.isna(raw) else str(raw).strip()
+    normalized = value.casefold().replace("_", " ")
+    if not normalized or normalized in {"nan", "null", "nominal", "none"}:
+        return "NOMINAL", "No defect detected. The measured strut matches the expected geometry.", "present"
+    if "missing" in normalized:
+        return "MISSING", "The design expects material here, but the measured strut is classified as missing.", "missing"
+    if "broken" in normalized:
+        return "BROKEN", "The strut shows a break or loss of continuity along its measured path.", "warning"
+    if "thin" in normalized:
+        return "THIN", "The measured cross-section is smaller than the expected strut geometry.", "warning"
+    if "inflated" in normalized or "thick" in normalized:
+        return "INFLATED / THICK", "The measured strut is larger than expected or extends beyond its expected profile.", "warning"
+    if "bent" in normalized:
+        return "BENT", "The measured strut curves away from its expected centerline.", "warning"
+    return value.replace("_", " ").upper(), "A geometry difference was detected; see the measurements below for detail.", "warning"
+
+
+def secondary_defect_text(value: Any) -> str:
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return "None"
+    text = str(value).strip()
+    if text.casefold() in {"", "nan", "null", "none", "none reported"}:
+        return "None"
+    return text.replace(";", ", ")
 
 def status_card(label: str, value: str, detail: str, tone: str = "neutral") -> None:
     st.markdown(
@@ -262,22 +328,295 @@ def severity(df):
     result = df.copy(); result["severity"] = np.select([values <= q1, values <= q2], ["Low","Medium"], default="High"); return result
 
 def overview(summary):
-    st.title("Overview"); st.caption("High-level view of the defect-inspection workspace.")
+    st.title("Lattice inspection workspace")
+    st.caption("A connected workspace for comparing designed lattice geometry with measured CT morphology.")
+    st.markdown("### Mission")
+    st.write("Turn CAD-versus-CT differences into traceable, human-verifiable defect decisions. Geometry, measurements, visual evidence, and review history stay together so every decision can be revisited.")
+    st.markdown("### Problem statement")
+    st.write("Additively manufactured lattices can deviate from their design through missing, broken, thin, inflated, or bent struts. Those deviations are spatially distributed and difficult to assess from one image or scalar measurement.")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### Data inputs")
+        st.write("• CAD/STL: nominal topology, strut paths, junctions, lengths, and expected material.\n\n• CT TIFF: reconstructed voxel intensities describing manufactured material.\n\n• Derived tables: registered centerlines, station measurements, classifications, and review flags.")
+    with right:
+        st.markdown("### Research questions")
+        st.write("• Where is material missing or unexpectedly present?\n\n• Which struts differ in thickness, continuity, or centerline position?\n\n• Which automated findings need a human decision?\n\n• Can a decision be traced to measurements and 3-D evidence?")
+    st.markdown("### System capabilities")
+    caps = st.columns(4)
+    for panel, title, detail in zip(caps, ["Linked evidence", "Quantitative review", "Human-in-the-loop", "Connected services"], ["PyVista CT/lattice views stay linked to the selected strut.", "Station trends expose occupancy, radius, offset, intensity, and excess material.", "Final decisions are persisted by FastAPI and can be reopened.", "FastAPI, Streamlit, PyVista, Plotly, and optional Gemini work together."]):
+        with panel:
+            st.markdown(f"**{title}**")
+            st.caption(detail)
+    st.markdown("### Pipeline summary")
+    st.info("CAD/STL geometry -> CT TIFF scan -> registration -> strut comparison -> morphology classification -> human review")
+    snapshot = st.columns(3)
+    with snapshot[0]: metric("Current struts", f"{len(summary):,}")
+    with snapshot[1]: metric("Review flags", f"{int(summary.needs_review.map(truthy).sum()):,}" if "needs_review" in summary else "N/A")
+    with snapshot[2]: metric("Defect labels", f"{summary.primary_defect.nunique():,}" if "primary_defect" in summary else "N/A")
+    team, tech = st.columns(2)
+    with team:
+        st.markdown("### Team")
+        st.caption("Placeholder for team names, roles, and affiliations.")
+    with tech:
+        st.markdown("### Technology")
+        st.caption("Python - FastAPI - Streamlit - PyVista - Plotly - optional Gemini")
     with st.container(border=True):
         st.subheader("Inspection workspace")
         st.write("FastAPI provides the analysis summary and per-strut station evidence; PyVista provides the linked CT visualization.")
         st.success(f"Analysis data ready — {len(summary):,} struts available from FastAPI.")
         st.write("Inspection Workflow documents the pipeline from source data through dashboard review.")
-def flowchart():
-    st.title("Inspection Workflow"); st.caption("The inspection pipeline from source data to human review.")
-    steps = [("CAD + CT scan","CAD provides nominal geometry; CT provides the measured lattice volume."),("Registration","Aligns CAD and CT coordinates."),("Missing-strut analysis","Finds absent or unexpected material relative to design."),("Station-level morphology analysis","Measures occupancy, diameter/radius, and centerline offset along each strut."),("Defect classification","Combines measurements into defect labels and stage 2 classifications."),("Dashboard review","Supports filtering, strut inspection, local decisions, and contextual questions.")]
-    for i,(title,desc) in enumerate(steps):
-        a, arrow, b = st.columns([1,.12,2.5]); a.markdown(f"<div class='flow-stage'><div class='flow-number'>{i+1:02d}</div><div class='flow-title'>{title}</div></div>", unsafe_allow_html=True)
-        if i < len(steps)-1: arrow.markdown("<div class='flow-arrow'></div>", unsafe_allow_html=True)
-        b.markdown(f"<div class='flow-description'>{desc}</div>", unsafe_allow_html=True)
+def flowchart(summary: pd.DataFrame) -> None:
+    st.title("Inspection Workflow")
+    st.caption("Follow the evidence from the designed lattice to a human decision.")
+
+    try:
+        reviews = load_reviews()
+    except (requests.RequestException, ValueError):
+        reviews = {}
+    viewer_ready, _ = viewer_status()
+    pipeline = load_pipeline_counts()
+    indexed = max(int(pipeline.get("indexed", 0)), len(summary))
+    compared = max(int(pipeline.get("compared", 0)), len(summary))
+    defect_count = int(pipeline.get("defects", 0)) or int(
+        (summary.get("primary_defect", pd.Series(dtype=str)).astype(str) != "Nominal").sum()
+    )
+    review_flags = int(summary.get("needs_review", pd.Series(dtype=bool)).map(truthy).sum())
+    reviewed_count = len(reviews)
+    unresolved_reviews = max(0, review_flags - reviewed_count)
+    scan_shape = pipeline.get("scan_shape", "volume dimensions unavailable")
+    stations = int(pipeline.get("stations", 21))
+    reference_population = int(pipeline.get("reference_population", 0))
+
+    stages = [
+        {
+            "title": "CAD geometry load",
+            "one_liner": "The design tells us where each strut should be.",
+            "status": f"{indexed:,} struts indexed",
+            "tone": "complete" if indexed else "attention",
+            "marker": "✓" if indexed else "01",
+            "explanation": "Think of this as the blueprint for the lattice: it lists every expected strut and how the pieces should connect.",
+            "technical": f"Source: all_struts_inventory.csv · {indexed:,} rows loaded.",
+        },
+        {
+            "title": "CT scan ingest",
+            "one_liner": "The scan shows what was actually made.",
+            "status": "Viewer connected" if viewer_ready else "Viewer offline",
+            "tone": "complete" if viewer_ready else "attention",
+            "marker": "✓" if viewer_ready else "⚠",
+            "explanation": "Like taking a detailed photograph of the finished lattice, this step brings the measured material into the workspace.",
+            "technical": f"Scan volume: {scan_shape} voxels · viewer {'available' if viewer_ready else 'not reachable'}.",
+        },
+        {
+            "title": "Registration",
+            "one_liner": "The design and scan are lined up in the same place.",
+            "status": "Registration complete" if compared else "Needs attention",
+            "tone": "complete" if compared else "attention",
+            "marker": "✓" if compared else "03",
+            "explanation": "This is like placing tracing paper over a blueprint so every designed strut can be compared with the matching piece in the scan.",
+            "technical": f"Reference population: {reference_population:,} designed positions." if reference_population else "Registered comparison coordinates are not available.",
+        },
+        {
+            "title": "Strut comparison",
+            "one_liner": "Each expected strut is checked against its measured shape.",
+            "status": f"{compared:,} struts compared",
+            "tone": "complete" if compared else "progress",
+            "marker": "✓" if compared else "04",
+            "explanation": "Like checking every item on a packing list, the system looks for missing material, breaks, thin spots, bulges, and shifts.",
+            "technical": f"{compared:,} struts · {stations} measurement points sampled along each strut.",
+            "target": "Explore Defects",
+        },
+        {
+            "title": "Morphology classification",
+            "one_liner": "Measured differences are grouped into clear finding types.",
+            "status": f"{defect_count:,} defects found" if defect_count else "No defects found",
+            "tone": "defect" if defect_count else "complete",
+            "marker": "⚠" if defect_count else "✓",
+            "explanation": "This is the sorting step: each unusual strut is placed into a simple category so a reviewer can understand what needs attention.",
+            "technical": f"{defect_count:,} non-nominal findings across {compared:,} compared struts.",
+            "target": "Defect Atlas",
+        },
+        {
+            "title": "Human review",
+            "one_liner": "A person checks the evidence and records the final call.",
+            "status": f"{unresolved_reviews:,} flags to review" if unresolved_reviews else f"{reviewed_count:,} decisions saved",
+            "tone": "defect" if unresolved_reviews else "progress",
+            "marker": "⚠" if unresolved_reviews else "06",
+            "explanation": "Like a second pair of eyes on a quality checklist, a reviewer confirms the finding using the linked images, measurements, and notes.",
+            "technical": f"{reviewed_count:,} saved decisions · {review_flags:,} review flags from the analysis.",
+            "target": "Review History",
+        },
+    ]
+
+    if "selected_stage" not in st.session_state:
+        st.session_state.selected_stage = int(st.session_state.get("workflow_step", 0)) + 1
+    selected_stage = max(1, min(len(stages), int(st.session_state.selected_stage)))
+    active = selected_stage - 1
+    st.session_state.selected_stage = selected_stage
+    st.session_state.workflow_step = active
+    if "workflow_expanded" not in st.session_state:
+        st.session_state.workflow_expanded = active
+    expanded = st.session_state.workflow_expanded
+
+    light_mode = st.toggle("Use light mode", value=st.session_state.get("workflow_light_mode", False), key="workflow_light_mode")
+    st.markdown(f"<div class='workflow-summary-heading'>Stage {selected_stage} of 6</div>", unsafe_allow_html=True)
+    components.html(f"""
+    <style>
+      :root {{ --stat-bg: {'#ffffff' if light_mode else '#111827'}; --stat-border: {'#cbd5e1' if light_mode else '#334155'}; --stat-text: {'#0f172a' if light_mode else '#f8fafc'}; --stat-muted: {'#475569' if light_mode else '#94a3b8'}; }}
+      .workflow-stats {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; font-family:Arial,sans-serif; }}
+      .workflow-stat {{ background:var(--stat-bg); border:1px solid var(--stat-border); border-radius:10px; padding:12px 14px; }}
+      .workflow-stat-label {{ color:var(--stat-muted); font-size:12px; font-weight:500; }}
+      .workflow-stat-value {{ color:var(--stat-text); font-size:24px; font-weight:500; margin-top:5px; }}
+    </style>
+    <div class="workflow-stats">
+      <div class="workflow-stat"><div class="workflow-stat-label">Struts indexed</div><div class="workflow-stat-value" data-count="{indexed}">0</div></div>
+      <div class="workflow-stat"><div class="workflow-stat-label">Struts compared</div><div class="workflow-stat-value" data-count="{compared}">0</div></div>
+      <div class="workflow-stat"><div class="workflow-stat-label">Defects found</div><div class="workflow-stat-value" data-count="{defect_count}">0</div></div>
+    </div>
+    <script>
+      const ease = t => 1 - Math.pow(1 - t, 4);
+      document.querySelectorAll('[data-count]').forEach(node => {{
+        const target = Number(node.dataset.count), start = performance.now(), duration = 900;
+        const tick = now => {{
+          const progress = Math.min(1, (now - start) / duration);
+          node.textContent = Math.round(target * ease(progress)).toLocaleString();
+          if (progress < 1) requestAnimationFrame(tick);
+        }};
+        requestAnimationFrame(tick);
+      }});
+    </script>
+    """, height=104, scrolling=False)
+
+    tone_vars = {"complete": "green", "attention": "amber", "defect": "red", "progress": "blue"}
+    stage_css = "\n".join(
+        f"""
+    .st-key-workflow-card-{index} {{ position:relative; padding-left:3.15rem; margin:0; }}
+    .st-key-workflow-card-{index} .stButton {{ position:relative; z-index:1; transition:transform 300ms ease; }}
+    .st-key-workflow-card-{index} .stButton:hover {{ transform:translateX(4px); }}
+    .st-key-workflow-card-{index} button {{ position:relative; min-height:86px; padding:1rem 3rem 1rem 1.2rem; border:1px solid var(--workflow-border); border-radius:10px; background:var(--workflow-surface); color:var(--workflow-text); text-align:left; white-space:pre-line; font-size:1rem; font-weight:500; line-height:1.45; transition:background-color 300ms ease, border-color 300ms ease; }}
+    .st-key-workflow-card-{index} button:hover {{ background:var(--workflow-surface-hover); border-color:var(--workflow-blue); }}
+    .st-key-workflow-card-{index} button::before {{ content:'{stage["marker"]}'; position:absolute; left:-2.7rem; top:1.1rem; width:2rem; height:2rem; display:grid; place-items:center; border:2px solid var(--workflow-{tone_vars[stage["tone"]]}); border-radius:50%; background:var(--workflow-bg); color:var(--workflow-{tone_vars[stage["tone"]]}); font-size:.8rem; font-weight:500; transition:transform 300ms cubic-bezier(.34,1.56,.64,1), border-color 300ms ease, color 300ms ease; }}
+    .st-key-workflow-card-{index} button:hover::before {{ transform:scale(1.1); border-color:var(--workflow-blue); color:var(--workflow-blue); }}
+    .st-key-workflow-card-{index} button::after {{ content:'›'; position:absolute; right:1.2rem; top:1.3rem; color:var(--workflow-muted); font-size:1.5rem; transition:transform 300ms ease, color 300ms ease; }}
+    .st-key-workflow-card-{index} .workflow-card-status {{ color:var(--workflow-{tone_vars[stage["tone"]]}); }}
+    .st-key-workflow-card-{index} .workflow-detail-inner {{ max-height:0; overflow:hidden; opacity:0; margin:0; padding:0 .2rem; transition:max-height 300ms ease, opacity 300ms ease, margin 300ms ease; }}
+    .st-key-workflow-card-{index} .workflow-detail-inner p {{ color:var(--workflow-text); margin:.25rem 0 .55rem; line-height:1.55; font-weight:500; }}
+    """
+        for index, stage in enumerate(stages)
+    )
+    expanded_css = ""
+    if expanded is not None:
+        expanded_css = f"""
+    .st-key-workflow-card-{expanded} button::after {{ transform:rotate(90deg); color:var(--workflow-blue); }}
+    .st-key-workflow-card-{expanded} .workflow-detail-inner {{ max-height:190px; opacity:1; margin:.2rem 0 1rem; }}
+    """
+    pulse_css = ""
+    if stages[active]["tone"] in {"progress", "attention"}:
+        pulse_css = f".st-key-workflow-card-{active} button::before {{ animation:workflow-ring 1.8s ease-in-out infinite; }}"
+    theme_vars = (
+        "--workflow-bg:#f8fafc; --workflow-surface:#ffffff; --workflow-surface-hover:#f1f5f9; --workflow-border:#cbd5e1; --workflow-text:#0f172a; --workflow-muted:#475569; --workflow-blue:#0284c7; --workflow-green:#15803d; --workflow-amber:#a16207; --workflow-red:#b91c1c; --workflow-line:#94a3b8;"
+        if light_mode else
+        "--workflow-bg:#0f172a; --workflow-surface:#111827; --workflow-surface-hover:#1e293b; --workflow-border:#334155; --workflow-text:#f8fafc; --workflow-muted:#94a3b8; --workflow-blue:#38bdf8; --workflow-green:#4ade80; --workflow-amber:#fbbf24; --workflow-red:#f87171; --workflow-line:#475569;"
+    )
+    st.markdown(f"""<style>
+    :root {{ {theme_vars} }}
+    .workflow-summary-heading {{ color:var(--workflow-muted); font-size:.82rem; font-weight:500; margin:.8rem 0 .2rem; }}
+    .workflow-timeline {{ max-width:860px; margin:.5rem auto 0; padding:0 1rem; }}
+    .workflow-card-status {{ display:inline-block; margin:.55rem 0 .35rem; border:1px solid currentColor; border-radius:999px; padding:.22rem .65rem; font-size:.74rem; font-weight:500; }}
+    .workflow-connector {{ height:1.2rem; margin-left:1.25rem; border-left:2px dashed var(--workflow-line); position:relative; }}
+    .workflow-connector.workflow-flowing::after {{ content:''; position:absolute; left:-3px; top:0; width:4px; height:10px; background:var(--workflow-blue); animation:workflow-dash 1s linear infinite; }}
+    @keyframes workflow-dash {{ to {{ transform:translateY(1.2rem); }} }}
+    @keyframes workflow-ring {{ 0%,100% {{ outline:0 solid transparent; }} 50% {{ outline:4px solid var(--workflow-blue); outline-offset:2px; }} }}
+    @media (prefers-reduced-motion: reduce) {{ .workflow-connector.workflow-flowing::after, * {{ animation:none !important; }} }}
+    {{stage_css}}
+    {{expanded_css}}
+    {{pulse_css}}
+    </style>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div class='workflow-shell {'workflow-light' if light_mode else ''}'><div class='workflow-timeline'>", unsafe_allow_html=True)
+    for index, stage in enumerate(stages):
+        is_expanded = expanded == index
+        with st.container(key=f"workflow-card-{index}"):
+
+            if st.button(f"{index + 1:02d}  {stage['title']}\n{stage['one_liner']}", key=f"workflow_step_{index}", width="stretch"):
+                st.session_state.selected_stage = index + 1
+                st.session_state.workflow_step = index
+                st.session_state.workflow_expanded = None if expanded == index else index
+                st.rerun()
+            st.markdown(f"<div class='workflow-card-status'>{stage['status']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='workflow-detail-inner'><p>{stage['explanation']}</p><div class='workflow-technical'>{stage['technical']}</div></div>", unsafe_allow_html=True)
+        if index < len(stages) - 1:
+            connector_class = "workflow-connector workflow-flowing" if index < active else "workflow-connector"
+            st.markdown(f"<div class='{connector_class}'></div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    st.divider()
+    if st.button("Start reviewing defects", key="workflow_start_review", type="primary", icon=":material/play_arrow:"):
+        st.session_state.page = "Explore Defects"
+        st.rerun()
+ATLAS_DEFS = {
+    "Missing": ("Missing", "Missing_Unintentional", "Missing_Intentional"),
+    "Broken": ("Broken",), "Thin": ("Thin",), "Inflated": ("Inflated",), "Bent": ("Bent",)
+}
+ATLAS_TEXT = {
+    "Missing": ("A strut expected by the design is absent, or material is classified as missing.", "Stage 2 missing-material classification; compare expected CAD occupancy with CT material mask.", "occupancy fraction / voxel-derived material mask", "Can remove a load path and reduce stiffness or connectivity."),
+    "Broken": ("A strut contains a discontinuity or a sustained low-material run.", "Broken score and longest low-material run across stations.", "station count / occupancy fraction", "May behave like a crack or complete loss of load transfer."),
+    "Thin": ("Measured cross-section is smaller than the nominal strut geometry.", "Low diameter or radius relative to nominal; thin score.", "um and diameter-to-nominal ratio", "Reduces local load capacity and can increase buckling risk."),
+    "Inflated": ("Measured material is larger than nominal or extends outside the expected profile.", "Outside-nominal material fraction and inflated score.", "um and outside-material fraction", "Can change local stiffness, pore size, and downstream flow or fit."),
+    "Bent": ("The measured centerline departs from the designed path.", "Maximum centerline offset and bend curvature score.", "um and curvature-derived score", "Changes load direction and may create eccentric or concentrated stresses."),
+}
+
+def defect_atlas(summary: pd.DataFrame) -> None:
+    st.title("Defect Atlas")
+    st.caption("A quick reference for the morphology labels used in the available analysis tables.")
+    st.info("Counts are derived from the current FastAPI summary. A zero count means no matching label is available, not necessarily that the defect is impossible.")
+    for name, aliases in ATLAS_DEFS.items():
+        count = int(summary.primary_defect.astype(str).isin(aliases).sum()) if "primary_defect" in summary else 0
+        matches = summary[summary.primary_defect.astype(str).isin(aliases)] if "primary_defect" in summary else pd.DataFrame()
+        example = int(matches.iloc[0].strut_id) if not matches.empty else None
+        meaning, rule, units, impact = ATLAS_TEXT[name]
+        with st.container(border=True):
+            title, count_col, action = st.columns([2.2, 1, 1.4])
+            with title: st.subheader(name)
+            with count_col: metric("Available count", f"{count:,}")
+            with action:
+                if st.button("Inspect example strut", key=f"atlas_{name}", disabled=example is None, width="stretch"):
+                    st.session_state.selected_strut_id = example
+                    st.session_state.selected_strut_picker = example
+                    st.session_state.page = "Explore Defects"
+                    st.rerun()
+            detail_a, detail_b = st.columns(2)
+            with detail_a: st.markdown(f"**What it means**  \n{meaning}\n\n**Detection rule**  \n{rule}")
+            with detail_b: st.markdown(f"**Measurement units**  \n{units}\n\n**Likely structural impact**  \n{impact}")
+
+def review_history(summary: pd.DataFrame) -> None:
+    st.title("Review History")
+    st.caption("Persisted human decisions returned by the FastAPI broker.")
+    try:
+        reviews = load_reviews()
+    except (requests.RequestException, ValueError) as exc:
+        st.warning(f"Review history is unavailable: {exc}")
+        return
+    decisions = pd.DataFrame([{"strut_id": sid, **record} for sid, record in reviews.items()])
+    counts = decisions["decision"].value_counts().to_dict() if not decisions.empty else {}
+    cards = st.columns(4)
+    for panel, label, value in zip(cards, ["Total decisions", "Confirmed defects", "Marked nominal", "Needs review"], [len(decisions), counts.get("confirmed_defect", 0), counts.get("nominal", 0), counts.get("needs_review", 0)]):
+        with panel: metric(label, f"{value:,}")
+    if decisions.empty:
+        st.info("No persisted review decisions yet. Save a decision from Explore Defects to begin the history.")
+        return
+    st.progress(min(1.0, len(decisions) / max(1, len(summary))), text=f"{len(decisions):,} of {len(summary):,} struts have a saved decision")
+    history = pd.DataFrame([{"strut_id": int(row.strut_id), "decision": str(row.get("decision", "")).replace("_", " ").title(), "timestamp": row.get("updated_utc", row.get("timestamp", "N/A")), "notes": row.get("notes", row.get("note", "")) or ""} for _, row in decisions.sort_values("strut_id").iterrows()])
+    event = st.dataframe(history, hide_index=True, width="stretch", height=360, on_select="rerun", selection_mode="single-row", key="review_history_table")
+    selected_rows = getattr(getattr(event, "selection", None), "rows", [])
+    if selected_rows:
+        selected_id = int(history.iloc[selected_rows[0]]["strut_id"])
+        if st.button(f"Reopen strut {selected_id}", key="reopen_selected_review"):
+            st.session_state.selected_strut_id = selected_id
+            st.session_state.selected_strut_picker = selected_id
+            st.session_state.page = "Explore Defects"
+            st.rerun()
 
 def analysis(summary):
-    st.title("Strut Analysis"); st.caption("Review FastAPI-backed analysis and inspect station-level evidence with the linked PyVista viewer.")
+    st.title("Explore Defects"); st.caption("Search, measure, visualize, chat about, and review one strut at a time.")
     summary = severity(summary.copy())
     for name, default in [("primary_defect", "Unknown"), ("stage2_classification", "Unknown"), ("needs_review", "Not provided"), ("severity", "Unscored")]:
         if name not in summary: summary[name] = default
@@ -291,73 +630,216 @@ def analysis(summary):
     source_columns = {
         "occupancy": col(summary, SUMMARY["occupancy"]),
         "deviation": col(summary, SUMMARY["deviation"]),
-        "ratio": col(summary, SUMMARY["ratio"] + ["diameter_ratio_to_nominal"]),
+        "ratio": col(summary, SUMMARY["ratio"] + ["diameter_ratio_to_nominal", "diameter_to_nominal_ratio"]),
         "diameter": col(summary, SUMMARY["diameter"]),
-        "bent": col(summary, ["curvature", "tortuosity", "tortuosity_ratio", "bend_curvature"]),
+        "bent": col(summary, SUMMARY["curvature"]),
         "review": col(summary, SUMMARY["needs_review"]),
     }
-    ratio_or_diameter = source_columns["ratio"] or source_columns["diameter"]
-    quick_requirements = {
-        "Lowest occupancy": source_columns["occupancy"],
-        "Largest deviation": source_columns["deviation"],
-        "Thinnest": ratio_or_diameter,
-        "Thickest/inflated": ratio_or_diameter,
-        "Most bent": source_columns["bent"],
-        "Needs review": source_columns["review"],
-    }
-    quick_actions = [("Lowest occupancy", "lowest_occupancy"), ("Largest deviation", "largest_deviation"), ("Thinnest", "thinnest"), ("Thickest/inflated", "thickest_inflated"), ("Most bent", "most_bent"), ("Needs review", "needs_review")]
+    metric_actions = []
+    if source_columns["occupancy"]:
+        metric_actions.append(("Lowest occupancy", "lowest_occupancy"))
+    if source_columns["deviation"]:
+        metric_actions.append(("Largest deviation", "largest_deviation"))
+    if source_columns["ratio"] or source_columns["diameter"]:
+        metric_actions.extend([("Thinnest", "thinnest"), ("Thickest/inflated", "thickest_inflated")])
+    if source_columns["bent"]:
+        metric_actions.append(("Most bent", "most_bent"))
 
-    def quick_candidates(choice):
+    available_analysis = [
+        ("Material occupancy", source_columns["occupancy"]),
+        ("Centerline deviation", source_columns["deviation"]),
+        ("Effective diameter or radius", source_columns["ratio"] or source_columns["diameter"]),
+        ("Curvature or tortuosity", source_columns["bent"]),
+        ("Primary defect type", col(summary, SUMMARY["primary_defect"])),
+        ("Review flags", source_columns["review"]),
+        ("Material status", col(summary, SUMMARY["stage2_classification"])),
+    ]
+    def quick_candidates(choice: str) -> tuple[pd.DataFrame, int | None, str | None]:
+        """Rank the complete loaded summary, independent of the search box."""
         frame = summary.copy()
-        if choice == "Needs review":
-            frame = frame[frame.needs_review.map(truthy)]
-            return frame.sort_values("strut_id"), int(frame.iloc[0].strut_id) if len(frame) else None
-        aliases = {
-            "Lowest occupancy": SUMMARY["occupancy"],
-            "Largest deviation": SUMMARY["deviation"],
-            "Thinnest": SUMMARY["ratio"] + ["diameter_ratio_to_nominal"] if source_columns["ratio"] else SUMMARY["diameter"],
-            "Thickest/inflated": SUMMARY["ratio"] + ["diameter_ratio_to_nominal"] if source_columns["ratio"] else SUMMARY["diameter"],
-            "Most bent": ["curvature", "tortuosity", "tortuosity_ratio", "bend_curvature"],
-        }
-        source = col(frame, aliases[choice])
-        if source is None: return frame.sort_values("strut_id"), None
-        ranked = frame.copy(); ranked["__quick_metric"] = pd.to_numeric(ranked[source], errors="coerce")
-        ascending = choice in {"Lowest occupancy", "Thinnest"}
-        ranked = ranked.dropna(subset=["__quick_metric"]).sort_values(["__quick_metric", "strut_id"], ascending=[ascending, True]).drop(columns="__quick_metric")
-        return ranked, int(ranked.iloc[0].strut_id) if len(ranked) else None
+        if choice == "Random flagged strut":
+            picked = st.session_state.get("selected_strut_id")
+            return frame, int(picked) if picked is not None else None, "Random flagged strut."
 
-    def activate_quick_pick(choice):
-        candidates, picked = quick_candidates(choice)
-        if picked is None: return
-        for filter_key in filter_keys: st.session_state.pop(filter_key, None)
-        st.session_state.quick_pick_state = choice
+        if "strut_id" not in frame:
+            return frame, None, "The loaded data does not include Strut IDs."
+
+        if choice == "Needs review":
+            review_source = source_columns["review"]
+            if review_source is None:
+                return frame, None, "Needs review is unavailable because review flags are not in the loaded data."
+            flagged = frame[frame[review_source].map(truthy)].copy()
+            resolved_ids = {
+                int(strut_id)
+                for strut_id, record in reviews.items()
+                if str(record.get("decision", "")).casefold() != "needs_review"
+            }
+            flagged = flagged[~flagged["strut_id"].astype(int).isin(resolved_ids)]
+            if flagged.empty:
+                return flagged, None, "There are no unresolved review flags in the loaded data."
+            severity_source = col(flagged, SUMMARY["severity"])
+            if severity_source:
+                numeric_severity = pd.to_numeric(flagged[severity_source], errors="coerce")
+                if numeric_severity.notna().any():
+                    flagged["__severity_rank"] = numeric_severity
+                else:
+                    severity_names = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+                    flagged["__severity_rank"] = flagged[severity_source].astype(str).str.casefold().map(severity_names).fillna(0)
+            else:
+                flagged["__severity_rank"] = 0
+            ranked = flagged.sort_values(["__severity_rank", "strut_id"], ascending=[False, True]).drop(columns="__severity_rank")
+            picked = int(ranked.iloc[0]["strut_id"])
+            return ranked, picked, f"Selected strut {picked}: needs review."
+
+        metric_sources = {
+            "Lowest occupancy": source_columns["occupancy"],
+            "Largest deviation": source_columns["deviation"],
+            "Thinnest": source_columns["ratio"] or source_columns["diameter"],
+            "Thickest/inflated": source_columns["ratio"] or source_columns["diameter"],
+            "Most bent": source_columns["bent"],
+        }
+        source = metric_sources[choice]
+        if source is None:
+            return frame, None, f"{choice} is unavailable because its metric is not in the loaded data."
+
+        if choice == "Thickest/inflated" and "primary_defect" in frame:
+            inflated = frame[frame["primary_defect"].astype(str).str.casefold() == "inflated"]
+            if not inflated.empty:
+                frame = inflated.copy()
+
+        ranked = frame.copy()
+        ranked["__quick_metric"] = pd.to_numeric(ranked[source], errors="coerce")
+        ranked = ranked.dropna(subset=["__quick_metric"])
+        if ranked.empty:
+            return ranked, None, f"{choice} is unavailable because the metric has no usable values."
+        ascending = choice in {"Lowest occupancy", "Thinnest"}
+        ranked = ranked.sort_values(["__quick_metric", "strut_id"], ascending=[ascending, True]).drop(columns="__quick_metric")
+        picked = int(ranked.iloc[0]["strut_id"])
+        metric_label = {
+            "Lowest occupancy": "lowest occupancy",
+            "Largest deviation": "largest centerline deviation",
+            "Thinnest": "thinnest strut",
+            "Thickest/inflated": "thickest/inflated strut",
+            "Most bent": "most bent strut",
+        }[choice]
+        return ranked, picked, f"Selected strut {picked}: {metric_label}."
+
+    def activate_quick_pick(choice: str) -> None:
+        # A shortcut always ranks the complete loaded dataset, never the text
+        # search or filter subset currently visible on the page.
+        for filter_key in filter_keys:
+            st.session_state.pop(filter_key, None)
+        _candidates, picked, message = quick_candidates(choice)
+        st.session_state.quick_pick_message = message
+        st.session_state.quick_pick_message_tone = "success" if picked is not None else "warning"
+        if picked is not None:
+            st.session_state.quick_pick_state = choice
+            st.session_state.quick_pick_sort = choice
+            st.session_state.show_matching_struts = True
+            st.session_state.selected_strut_id = picked
+            st.session_state.selected_strut_picker = picked
+            st.session_state.page = "Explore Defects"
+        else:
+            st.session_state.pop("quick_pick_state", None)
+            st.session_state.pop("quick_pick_sort", None)
+            st.session_state.show_matching_struts = False
+
+    def clear_launcher_filters() -> None:
+        for filter_key in filter_keys:
+            st.session_state.pop(filter_key, None)
+
+    def activate_random_flagged() -> None:
+        clear_launcher_filters()
+        review_source = source_columns["review"]
+        if review_source is None:
+            st.session_state.quick_pick_message = "Random flagged strut is unavailable because review flags are not in the loaded data."
+            st.session_state.quick_pick_message_tone = "warning"
+            return
+        flagged = summary[summary[review_source].map(truthy)]
+        if flagged.empty:
+            st.session_state.quick_pick_message = "No flagged struts are available in the loaded data."
+            st.session_state.quick_pick_message_tone = "warning"
+            return
+        picked = int(flagged.sample(n=1).iloc[0].strut_id)
+        st.session_state.quick_pick_state = "Random flagged strut"
+        st.session_state.quick_pick_sort = "Random flagged strut"
         st.session_state.show_matching_struts = True
         st.session_state.selected_strut_id = picked
         st.session_state.selected_strut_picker = picked
+        st.session_state.page = "Explore Defects"
+        st.session_state.quick_pick_message = f"Selected strut {picked}: random flagged strut."
+        st.session_state.quick_pick_message_tone = "success"
 
-    def reset_filters():
-        for filter_key in filter_keys: st.session_state.pop(filter_key, None)
+    def activate_next_unresolved() -> None:
+        activate_quick_pick("Needs review")
+
+    def browse_all_struts() -> None:
+        clear_launcher_filters()
         st.session_state.pop("quick_pick_state", None)
+        st.session_state.pop("quick_pick_sort", None)
+        st.session_state.show_matching_struts = True
+        st.session_state.page = "Explore Defects"
+        st.session_state.quick_pick_message = "Showing all struts."
+        st.session_state.quick_pick_message_tone = "success"
+    def reset_filters() -> None:
+        for filter_key in filter_keys:
+            st.session_state.pop(filter_key, None)
+        st.session_state.pop("quick_pick_state", None)
+        st.session_state.pop("quick_pick_sort", None)
         st.session_state.pop("selected_strut_id", None)
         st.session_state.pop("selected_strut_picker", None)
         st.session_state.show_matching_struts = False
+        st.session_state.quick_pick_message = "Filters reset; showing the full dataset."
+        st.session_state.quick_pick_message_tone = "success"
 
     with st.container(border=True):
-        st.subheader("Inspection Start")
+        st.subheader("Inspection launcher")
         search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
         primary, stage2, review, sev = [], [], [], []
         st.caption(f"Loaded dataset: {len(summary):,} struts")
-        quick_picks = st.columns(6)
-        for button, (label, action) in zip(quick_picks, quick_actions):
-            available = quick_requirements[label] is not None
-            help_text = None if available else f"Unavailable: required metric for {label.lower()} is not present in the FastAPI summary."
-            button.button(label, key=f"quick_pick_{action}", disabled=not available, help=help_text, width='stretch', on_click=activate_quick_pick, args=(label,))
+        launcher = st.columns(3)
+        with launcher[0]:
+            st.button("Open random flagged strut", key="open_random_flagged", width="stretch", on_click=activate_random_flagged)
+        with launcher[1]:
+            st.button("Open next unresolved review", key="open_next_unresolved", width="stretch", on_click=activate_next_unresolved)
+        with launcher[2]:
+            st.button("Browse all struts", key="browse_all_struts", width="stretch", on_click=browse_all_struts)
+
+        if metric_actions:
+            st.caption("Metric ranking")
+            metric_buttons = st.columns(min(3, len(metric_actions)))
+            for index, (label, action) in enumerate(metric_actions):
+                metric_buttons[index % len(metric_buttons)].button(
+                    label,
+                    key=f"quick_pick_{action}",
+                    width="stretch",
+                    on_click=activate_quick_pick,
+                    args=(label,),
+                )
+
+        with st.expander("Available analysis", expanded=False):
+            available = [f"{label} ({column})" for label, column in available_analysis if column]
+            unavailable = [label for label, column in available_analysis if not column]
+            panel_left, panel_right = st.columns(2)
+            with panel_left:
+                st.caption("Available")
+                st.write(" · ".join(available) if available else "No optional analysis fields detected.")
+            with panel_right:
+                st.caption("Unavailable")
+                st.write(" · ".join(unavailable) if unavailable else "All listed analysis fields are available.")
+
         st.button("Reset filters", key="reset_filters", use_container_width=False, on_click=reset_filters)
 
+        quick_message = st.session_state.pop("quick_pick_message", None)
+        if quick_message:
+            if st.session_state.pop("quick_pick_message_tone", "success") == "warning":
+                st.warning(quick_message)
+            else:
+                st.success(quick_message)
     quick_state = st.session_state.get("quick_pick_state")
     quick_active = bool(quick_state and not search.strip() and not primary and not stage2 and not review and not sev)
     if quick_active:
-        filtered, quick_selected = quick_candidates(quick_state)
+        filtered, quick_selected, _ = quick_candidates(quick_state)
         st.info(f"Quick pick active: {quick_state} - showing top candidates.")
     else:
         mask = pd.Series(True, index=summary.index)
@@ -435,15 +917,22 @@ def analysis(summary):
     length, length_source = metric_number(["length_um", "inventory_length_um", "length_um_from_centerline"])
     length = scale_to_um(length, length_source)
     status, status_detail, tone = material_status(selected)
-    secondary = str(selected.get("secondary_defects", "")).replace(";", ", ") or "None reported"
+    classification, classification_detail, classification_tone = geometry_classification(selected)
+    secondary = secondary_defect_text(selected.get("secondary_defects"))
     current_review = reviews.get(int(current), {}).get("decision", "No final decision")
-    cards = st.columns(5)
+    st.markdown(
+        f'<div class="classification-card classification-{classification_tone}">'
+        f'<div class="classification-label">Overall classification</div>'
+        f'<div class="classification-badge">{escape(classification)}</div>'
+        f'<div class="classification-detail">{escape(classification_detail)}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Material status describes whether material was expected and found. Overall classification describes the measured shape of the strut.")
+    cards = st.columns(4)
     with cards[0]: status_card("Material status", status, status_detail, tone)
-    with cards[1]: status_card("Primary defect", primary_label(selected), "Geometry screening classification.", "warning" if primary_label(selected) != "No detected geometry defect" else "present")
-    with cards[2]: status_card("Secondary defects", secondary, "Additional concurrent defect signals.")
-    with cards[3]: status_card("Length", fmt(length, 1, "µm"), "Registered centerline length.")
-    with cards[4]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 1, "µm"), "Twice the median cross-sectional radius.")
-
+    with cards[1]: status_card("Secondary defects", secondary, "Additional geometry signals beyond the overall classification.")
+    with cards[2]: status_card("Length", fmt(length, 1, "µm"), "Registered centerline length.")
+    with cards[3]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 1, "µm"), "Twice the median cross-sectional radius.")
     st.subheader("Linked 3-D inspection")
     viewer_ready, viewer_message = viewer_status()
     if viewer_ready:
@@ -498,8 +987,9 @@ def analysis(summary):
         st.markdown("**Technical data**")
         st.json(selected.to_dict())
         st.dataframe(stations.drop(columns=["__position_pct"], errors="ignore"), hide_index=True, width='stretch')
-    st.markdown("**Chat context**"); st.caption(f"Questions use FastAPI-backed values for selected strut {current}.")
-    use_gemini = st.toggle("Use Gemini for open-ended questions", value=False, key="use_gemini_chat")
+    st.markdown("**Chat context**")
+    st.caption(f"Data and selections are served by FastAPI for selected strut {current}.")
+    provider = st.selectbox("Chat provider", options=["fastapi", "gemini"], format_func=lambda value: "FastAPI (local analysis)" if value == "fastapi" else "Gemini", key="chat_provider", help="FastAPI answers with local deterministic analysis. Gemini answers using read-only dashboard data tools.")
     for message in st.session_state.get("chat_messages", []):
         with st.chat_message(message["role"]): st.markdown(message["content"])
     question = st.chat_input(f"Ask about strut {current} or the defect summary")
@@ -509,7 +999,7 @@ def analysis(summary):
         try:
             response = api_post(
                 "/chat",
-                {"message": question, "active_strut_id": current, "chat_history": messages[-4:], "use_gemini": use_gemini},
+                {"message": question, "active_strut_id": current, "chat_history": messages[-4:], "provider": provider},
             )
             messages.append({"role": "assistant", "content": response.get("reply", "Chat returned no response.")})
             selection = response.get("selection") or {}
@@ -527,11 +1017,12 @@ def analysis(summary):
 
 st.markdown("""
 <style>
-.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
+.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.classification-card{border:1px solid #334155;border-radius:12px;padding:18px 20px;margin:12px 0 8px}.classification-label{color:#94a3b8;font-size:.78rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase}.classification-badge{display:inline-block;margin-top:7px;border-radius:999px;padding:7px 14px;font-size:1.35rem;font-weight:700;letter-spacing:.04em}.classification-detail{color:#cbd5e1;font-size:.9rem;margin-top:9px}.classification-present{border-color:#22c55e}.classification-present .classification-badge{background:#166534;color:#dcfce7}.classification-missing{border-color:#ef4444}.classification-missing .classification-badge{background:#991b1b;color:#fee2e2}.classification-warning{border-color:#f59e0b}.classification-warning .classification-badge{background:#92400e;color:#fef3c7}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
 [data-testid="stSidebar"] [data-testid="stButton"] button{justify-content:flex-start;border-radius:7px;font-weight:600;min-height:42px;margin:2px 0}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]{background:transparent;border-color:transparent;color:#e5e7eb}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover{background:#1f2937;border-color:transparent;color:#fff}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]{background:#1f2937;border-color:#1f2937;border-left:3px solid #38bdf8;color:#f8fafc}
+
 </style>
 """, unsafe_allow_html=True)
 sync_selection()
@@ -548,14 +1039,16 @@ for name, default in (("primary_defect", "Unknown"), ("stage2_classification", "
     summary[name] = summary[name].fillna(default).astype(str)
 
 with st.sidebar:
-    st.caption("Navigation")
+    st.caption("Stage 4 inspection")
     st.session_state.setdefault("page", "Overview")
-    nav_items = [("Overview", ":material/dashboard:"), ("Inspection Workflow", ":material/account_tree:"), ("Strut Analysis", ":material/analytics:")]
+    nav_items = [("Overview", ":material/dashboard:"), ("Inspection Workflow", ":material/account_tree:"), ("Explore Defects", ":material/analytics:"), ("Defect Atlas", ":material/menu_book:")]
     for label, icon in nav_items:
         if st.button(label, icon=icon, key=f"nav_{label}", type="primary" if st.session_state.page == label else "secondary", width='stretch'):
             st.session_state.page = label
             st.rerun()
 page = st.session_state.page
 if page=="Overview": overview(summary)
-elif page=="Inspection Workflow": flowchart()
-else: analysis(summary)
+elif page=="Inspection Workflow": flowchart(summary)
+elif page=="Explore Defects": analysis(summary)
+elif page=="Defect Atlas": defect_atlas(summary)
+elif page=="Review History": review_history(summary)
