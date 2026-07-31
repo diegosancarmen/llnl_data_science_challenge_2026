@@ -955,7 +955,6 @@ def analysis(summary):
         if search.strip(): filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
         filtered = filtered.sort_values("strut_id")
     st.subheader("Strut ID selector")
-    search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
     filtered = summary.copy()
     if search.strip():
         filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
@@ -965,6 +964,7 @@ def analysis(summary):
     browse = st.button("Browse matching struts", key="browse_matching_struts", use_container_width=False)
     if browse: st.session_state.show_matching_struts = not st.session_state.get("show_matching_struts", False)
     table_event = None
+    
     if st.session_state.get("show_matching_struts", False):
         useful = [x for x in ["strut_id", "primary_defect", "stage2_classification", "severity", "needs_review"] if x in filtered]
         table_event = st.dataframe(filtered[useful], hide_index=True, height=420, width='stretch', on_select="rerun", selection_mode="single-row", key="defect_queue")
