@@ -146,21 +146,87 @@ def save_review(strut_id: int, decision: str) -> None:
 
 
 def material_status(row: pd.Series) -> tuple[str, str, str]:
-    classification = str(row.get("stage2_classification", "Unknown"))
-    if classification == "Nominal":
-        return "Nominally present", "Material is expected at this CAD strut.", "present"
-    if classification == "Missing_Intentional":
-        return "Nominally missing", "CAD intentionally expects no material at this strut.", "missing"
-    if classification == "Missing_Unintentional":
-        return "Unexpectedly missing", "CAD expects material, but this strut is missing.", "missing"
-    if classification == "Expected_Missing_But_Material_Present":
-        return "Unexpected material", "Material is present where CAD expects the strut to be absent.", "warning"
-    return classification.replace("_", " "), "No material-status interpretation is available.", "neutral"
+    category = strut_category(row)
+    details = {
+        "Present by Design — No defects": ("Material is expected at this CAD strut; no primary geometry defect detected.", "present"),
+        "Present by Design — Defect present": ("Material is expected at this CAD strut; a primary geometry defect was detected.", "warning"),
+        "Missing by Design": ("CAD intentionally expects no material at this strut.", "missing"),
+        "Missing by Accident": ("CAD expects material, but this strut is missing.", "missing"),
+        "Unexpected material": ("Material is present where CAD expects the strut to be absent.", "warning"),
+    }
+    detail, tone = details[category]
+    return category, detail, tone
+
+
+DISPLAY_CLASSIFICATION_NAMES = {
+    "Missing_Intentional": "Missing by Design",
+    "Missing_Unintentional": "Missing by Accident",
+}
+
+
+def display_classification(value: Any) -> str:
+    return DISPLAY_CLASSIFICATION_NAMES.get(str(value), str(value).replace("_", " "))
 
 
 def primary_label(row: pd.Series) -> str:
     value = str(row.get("primary_defect", "Nominal"))
     return "No detected geometry defect" if value in {"", "Nominal", "nan"} else value
+
+
+NO_DEFECT_LABELS = {
+    "", "nominal", "nan", "unknown", "none", "null", "no detected geometry defect",
+    "missing_intentional", "missing_unintentional",
+}
+TOP_LEVEL_CATEGORIES = [
+    "Present by Design — No defects",
+    "Present by Design — Defect present",
+    "Missing by Design",
+    "Missing by Accident",
+    "Unexpected material",
+]
+
+
+def has_primary_defect(row: pd.Series) -> bool:
+    return str(row.get("primary_defect", "Nominal")).strip().casefold() not in NO_DEFECT_LABELS
+
+
+def strut_category(row: pd.Series) -> str:
+    classification = str(row.get("stage2_classification", "Unknown")).strip()
+    if classification == "Nominal":
+        return "Present by Design — Defect present" if has_primary_defect(row) else "Present by Design — No defects"
+    if classification == "Missing_Intentional":
+        return "Missing by Design"
+    if classification == "Missing_Unintentional":
+        return "Missing by Accident"
+    return "Unexpected material"
+
+
+NO_DEFECT_LABELS = {
+    "", "nominal", "nan", "unknown", "none", "null", "no detected geometry defect",
+    "missing_intentional", "missing_unintentional",
+}
+TOP_LEVEL_CATEGORIES = [
+    "Present by Design — No defects",
+    "Present by Design — Defect present",
+    "Missing by Design",
+    "Missing by Accident",
+    "Unexpected material",
+]
+
+
+def has_primary_defect(row: pd.Series) -> bool:
+    return str(row.get("primary_defect", "Nominal")).strip().casefold() not in NO_DEFECT_LABELS
+
+
+def strut_category(row: pd.Series) -> str:
+    classification = str(row.get("stage2_classification", "Unknown")).strip()
+    if classification == "Nominal":
+        return "Present by Design — Defect present" if has_primary_defect(row) else "Present by Design — No defects"
+    if classification == "Missing_Intentional":
+        return "Missing by Design"
+    if classification == "Missing_Unintentional":
+        return "Missing by Accident"
+    return "Unexpected material"
 
 
 def geometry_classification(row: pd.Series) -> tuple[str, str, str]:
@@ -199,49 +265,87 @@ def status_card(label: str, value: str, detail: str, tone: str = "neutral") -> N
     )
 
 
-def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str, Any]]) -> None:
-    frame = summary.copy()
-    frame["__material_status"] = frame.apply(lambda row: material_status(row)[0], axis=1)
-    frame["__primary_label"] = frame.apply(primary_label, axis=1)
-    missing = frame["__material_status"] == "Nominally missing"
-    frame.loc[missing, "__primary_label"] = frame.loc[missing, "stage2_classification"].astype(str).str.replace("_", " ")
-
-    parent_counts = frame["__material_status"].value_counts()
-    pie = go.Figure(go.Pie(
-        labels=parent_counts.index, values=parent_counts.values, hole=0.45,
-        hovertemplate="%{label}<br>%{value:,} struts<br>%{percent:.2%} of all struts<extra></extra>",
-    ))
-    pie.update_layout(margin=dict(l=0, r=0, t=35, b=0), title="Material status")
-
-    defect_frame = frame[frame["__primary_label"] != "No detected geometry defect"]
-    defect_counts = defect_frame["__primary_label"].value_counts().sort_values()
-    defect_percent = defect_counts / defect_counts.sum() * 100
-    defect_bars = go.Figure(go.Bar(
-        x=defect_counts.values,
-        y=defect_counts.index,
-        orientation="h",
-        marker_color="#f97316",
-        text=[f"{count:,} ({percent:.1f}%)" for count, percent in zip(defect_counts.values, defect_percent.values)],
-        textposition="outside",
-        hovertemplate="%{y}<br>%{x:,} struts<br>%{customdata:.2f}% of defect-bearing struts<extra></extra>",
-        customdata=defect_percent.values,
-    ))
-    defect_bars.update_layout(
-        height=300, margin=dict(l=10, r=65, t=42, b=10), title="Defect-bearing struts",
-        xaxis_title="Strut count", yaxis_title=None,
+def category_count_card(label: str, count: int, percent: float, detail: str, intensity: float, tone: str = "neutral") -> None:
+    """Render one category card using the all-strut denominator."""
+    lightness = 72 - (27 * intensity)
+    color = f"hsl(25, 92%, {lightness:.0f}%)"
+    percent_text = "<0.01%" if count and percent < 0.01 else f"{percent:.1f}%"
+    st.markdown(
+        f'<div class="category-card category-{tone}" style="border-left-color:{color}"><div class="status-label">{escape(label)}</div>'
+        f'<div class="status-value">{count:,}</div><div class="status-detail">{escape(percent_text)} of all struts — {escape(detail)}</div></div>',
+        unsafe_allow_html=True,
     )
+
+
+def render_statistics_banner(summary: pd.DataFrame, reviews: dict[int, dict[str, Any]]) -> None:
+    """Render mutually exclusive top-level categories plus overlapping defect details."""
+    frame = summary.copy()
+    frame["__category"] = frame.apply(strut_category, axis=1)
+    frame["__primary_label"] = frame.apply(primary_label, axis=1)
+    total_struts = len(frame)
+    counts = frame["__category"].value_counts().reindex(TOP_LEVEL_CATEGORIES, fill_value=0)
 
     automated_review = frame["needs_review"].map(truthy)
     unresolved = int(sum(automated_review & ~frame["strut_id"].astype(int).isin(reviews)))
     final_counts = pd.Series([item["decision"] for item in reviews.values()]).value_counts().to_dict()
-    pie_col, defects_col, queue_col = st.columns([1.2, 2.1, 0.7])
-    with pie_col: st.plotly_chart(chart(pie, 300), width='stretch')
-    with defects_col: st.plotly_chart(chart(defect_bars, 300), width='stretch')
+    reviewed_ids = {int(strut_id) for strut_id in reviews}
+    summary_ids = set(frame["strut_id"].astype(int))
+    saved_nominal_ids = {
+        int(strut_id) for strut_id, item in reviews.items()
+        if item.get("decision") == "nominal" and int(strut_id) in summary_ids
+    }
+    unflagged_nominal_ids = set(frame.loc[
+        (frame["stage2_classification"] == "Nominal")
+        & ~automated_review
+        & ~frame["strut_id"].astype(int).isin(reviewed_ids),
+        "strut_id",
+    ].astype(int))
+    final_nominal = len(saved_nominal_ids | unflagged_nominal_ids)
+
+    content_col, queue_col = st.columns([4.0, 1.0])
+    with content_col:
+        st.markdown("### Strut categories")
+        details = [
+            "Expected material with no primary defect.",
+            "Expected material with a primary defect.",
+            "CAD intentionally has no material.",
+            "Expected material is absent.",
+            "Material exists outside the expected design.",
+        ]
+        tones = ["present", "warning", "missing", "missing", "warning"]
+        columns = st.columns(3)
+        maximum = max(int(counts.max()), 1)
+        for index, label in enumerate(TOP_LEVEL_CATEGORIES):
+            count = int(counts[label])
+            with columns[index % len(columns)]:
+                category_count_card(
+                    label, count, count / total_struts * 100 if total_struts else 0,
+                    details[index], count / maximum, tones[index],
+                )
+
+        defect_frame = frame[
+            (frame["__category"] == "Present by Design — Defect present")
+            & frame["__primary_label"].str.strip().str.casefold().map(lambda value: value not in NO_DEFECT_LABELS)
+        ]
+        defect_counts = defect_frame["__primary_label"].value_counts().sort_values(ascending=False)
+        st.markdown("### Primary defect details")
+        if defect_counts.empty:
+            st.info("No geometry defects detected.")
+        else:
+            columns = st.columns(3)
+            maximum = max(int(defect_counts.max()), 1)
+            for index, (label, count) in enumerate(defect_counts.items()):
+                with columns[index % len(columns)]:
+                    category_count_card(
+                        f"Primary defect: {label}", int(count),
+                        int(count) / total_struts * 100 if total_struts else 0,
+                        "Intentional detail overlap with Defect present.", int(count) / maximum,
+                    )
     with queue_col:
         st.markdown("### Review queue")
         metric("Unresolved", f"{unresolved:,}", "Automated review flags without a final saved decision.")
         st.caption(f"Automated flags: {int(automated_review.sum()):,}")
-        st.caption(f"Final nominal: {final_counts.get('nominal', 0):,}")
+        st.caption(f"Final nominal: {final_nominal:,} / {total_struts:,} ({final_nominal / total_struts:.1%})" if total_struts else "Final nominal: 0 / 0")
         st.caption(f"Final needs review: {final_counts.get('needs_review', 0):,}")
         st.caption(f"Confirmed defect: {final_counts.get('confirmed_defect', 0):,}")
 
@@ -850,6 +954,12 @@ def analysis(summary):
         filtered = summary[mask].copy()
         if search.strip(): filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
         filtered = filtered.sort_values("strut_id")
+    st.subheader("Strut ID selector")
+    search = st.text_input("Strut ID", placeholder="Search strut ID, e.g. 1728", key="filter_search")
+    filtered = summary.copy()
+    if search.strip():
+        filtered = filtered[filtered.strut_id.astype(str).str.contains(search.strip(), regex=False)]
+    filtered = filtered.sort_values("strut_id")
     ids = filtered.strut_id.astype(int).tolist()
     st.caption(f"Showing {len(ids):,} of {len(summary):,} struts.")
     browse = st.button("Browse matching struts", key="browse_matching_struts", use_container_width=False)
@@ -859,7 +969,7 @@ def analysis(summary):
         useful = [x for x in ["strut_id", "primary_defect", "stage2_classification", "severity", "needs_review"] if x in filtered]
         table_event = st.dataframe(filtered[useful], hide_index=True, height=420, width='stretch', on_select="rerun", selection_mode="single-row", key="defect_queue")
     if not ids:
-        st.warning("No struts match the current filters."); return
+        st.warning("No struts match this Strut ID search."); return
 
     previous = st.session_state.get("selected_strut_id")
     current = int(previous) if previous in ids else ids[0]
@@ -910,6 +1020,17 @@ def analysis(summary):
         if number is None or pd.isna(number): return "N/A"
         number = float(number) * 100 if abs(float(number)) <= 1 else float(number)
         return f"{number:.{digits}f}%"
+    def nominal_median(aliases, convert_radius_to_diameter=False):
+        source = col(summary, aliases)
+        if source is None:
+            return None
+        values = pd.to_numeric(
+            summary.loc[summary["stage2_classification"] == "Nominal", source], errors="coerce"
+        ).dropna()
+        if values.empty:
+            return None
+        baseline = float(values.map(lambda number: scale_to_um(number, source)).median())
+        return baseline * 2 if convert_radius_to_diameter else baseline
 
     st.divider(); st.subheader(f"Selected strut {current}")
     radius, radius_source = metric_number(["median_cross_section_radius_um", "median_radius_um"])
@@ -917,6 +1038,16 @@ def analysis(summary):
     length, length_source = metric_number(["length_um", "inventory_length_um", "length_um_from_centerline"])
     length = scale_to_um(length, length_source)
     status, status_detail, tone = material_status(selected)
+    secondary_raw = selected.get("secondary_defects", "")
+    secondary = (
+        "Not Listed"
+        if pd.isna(secondary_raw) or str(secondary_raw).strip().casefold() in {"", "nan", "none", "null", "<na>"}
+        else str(secondary_raw).replace(";", ", ")
+    )
+    nominal_length = nominal_median(["length_um", "inventory_length_um", "length_um_from_centerline"])
+    nominal_diameter = nominal_median(
+        ["median_cross_section_radius_um", "median_radius_um"], convert_radius_to_diameter=True
+    )
     classification, classification_detail, classification_tone = geometry_classification(selected)
     secondary = secondary_defect_text(selected.get("secondary_defects"))
     current_review = reviews.get(int(current), {}).get("decision", "No final decision")
@@ -931,8 +1062,8 @@ def analysis(summary):
     cards = st.columns(4)
     with cards[0]: status_card("Material status", status, status_detail, tone)
     with cards[1]: status_card("Secondary defects", secondary, "Additional geometry signals beyond the overall classification.")
-    with cards[2]: status_card("Length", fmt(length, 1, "µm"), "Registered centerline length.")
-    with cards[3]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 1, "µm"), "Twice the median cross-sectional radius.")
+    with cards[2]: status_card("Length", fmt(length, 2, "µm"), f"All nominal struts median: {fmt(nominal_length, 2, 'µm')}")
+    with cards[3]: status_card("Median diameter", fmt(None if radius is None else radius * 2, 2, "µm"), f"All nominal struts median: {fmt(nominal_diameter, 2, 'µm')}")
     st.subheader("Linked 3-D inspection")
     viewer_ready, viewer_message = viewer_status()
     if viewer_ready:
@@ -987,12 +1118,48 @@ def analysis(summary):
         st.markdown("**Technical data**")
         st.json(selected.to_dict())
         st.dataframe(stations.drop(columns=["__position_pct"], errors="ignore"), hide_index=True, width='stretch')
-    st.markdown("**Chat context**")
-    st.caption(f"Data and selections are served by FastAPI for selected strut {current}.")
+    st.markdown("**Chat context**"); st.caption(f"Questions use FastAPI-backed values for selected strut {current}. Suggested prompts fill the editable message box.")
     provider = st.selectbox("Chat provider", options=["fastapi", "gemini"], format_func=lambda value: "FastAPI (local analysis)" if value == "fastapi" else "Gemini", key="chat_provider", help="FastAPI answers with local deterministic analysis. Gemini answers using read-only dashboard data tools.")
     for message in st.session_state.get("chat_messages", []):
         with st.chat_message(message["role"]): st.markdown(message["content"])
-    question = st.chat_input(f"Ask about strut {current} or the defect summary")
+    defect_categories = sorted(
+        {
+            str(category) for category in summary["primary_defect"].dropna()
+            if str(category).strip().casefold() not in {"", "nominal", "nan", "unknown"}
+        },
+        key=str.casefold,
+    )
+    suggested_prompts = {
+        "Current strut": [
+            ("Inspect this strut", f"Inspect strut {current}"),
+            ("Largest deviation", f"Where is the largest deviation on strut {current}?"),
+            ("Lowest occupancy", f"What is the lowest occupancy on strut {current}?"),
+        ],
+        "Compare / select": [
+            ("Compare with nominal", f"Compare strut {current} with all nominal struts"),
+            ("Review candidates", "List struts needing review"),
+            ("Rank deviations", "Show the top 10 struts by maximum deviation"),
+        ],
+        "Dataset overview": [
+            ("Defect summary", "Give me a defect summary"),
+            ("Explain occupancy", "What does material occupancy mean?"),
+            ("Explain Stage 2", "What is Stage 2 classification?"),
+        ],
+        "Inspect by defect": [
+            (f"All {display_classification(category)}", f"Inspect all struts with primary defect {display_classification(category)}")
+            for category in defect_categories
+        ],
+    }
+    def set_chat_draft(prompt: str) -> None:
+        st.session_state.chat_draft = prompt
+    st.caption("Suggested prompts")
+    prompt_groups = st.columns(len(suggested_prompts))
+    for panel, (group, prompts) in zip(prompt_groups, suggested_prompts.items()):
+        with panel:
+            st.markdown(f"*{group}*")
+            for label, prompt in prompts:
+                st.button(label, key=f"chat_prompt_{group}_{label}_{current}", width="stretch", on_click=set_chat_draft, args=(prompt,))
+    question = st.chat_input(f"Ask about strut {current}, selected struts, or the dataset", key="chat_draft")
     if question:
         messages = st.session_state.setdefault("chat_messages", [])
         messages.append({"role": "user", "content": question})
@@ -1017,7 +1184,7 @@ def analysis(summary):
 
 st.markdown("""
 <style>
-.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;min-height:76px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.classification-card{border:1px solid #334155;border-radius:12px;padding:18px 20px;margin:12px 0 8px}.classification-label{color:#94a3b8;font-size:.78rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase}.classification-badge{display:inline-block;margin-top:7px;border-radius:999px;padding:7px 14px;font-size:1.35rem;font-weight:700;letter-spacing:.04em}.classification-detail{color:#cbd5e1;font-size:.9rem;margin-top:9px}.classification-present{border-color:#22c55e}.classification-present .classification-badge{background:#166534;color:#dcfce7}.classification-missing{border-color:#ef4444}.classification-missing .classification-badge{background:#991b1b;color:#fee2e2}.classification-warning{border-color:#f59e0b}.classification-warning .classification-badge{background:#92400e;color:#fef3c7}.status-present{border-left:4px solid #22c55e}.status-missing{border-left:4px solid #ef4444}.status-warning{border-left:4px solid #f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
+.stApp{background:#0b1120}[data-testid="stSidebar"]{background:#111827;border-right:1px solid #293750}.metric-card,.status-card,.category-card{background:#172033;border:1px solid #293750;border-radius:12px;padding:14px 16px;height:150px;min-height:150px;box-sizing:border-box}.status-card{height:180px;min-height:180px}.metric-card,.status-card,.category-card{display:flex;flex-direction:column}.category-card{border-left:4px solid #f97316;margin-bottom:10px}.metric-label,.status-label{color:#94a3b8;font-size:.76rem;text-transform:uppercase;letter-spacing:.06em}.metric-value,.status-value{color:#f8fafc;font-size:1.15rem;font-weight:650;margin-top:7px}.status-detail{color:#cbd5e1;font-size:.78rem;margin-top:6px}.status-present,.category-present{border-left-color:#22c55e}.status-missing,.category-missing{border-left-color:#ef4444}.status-warning,.category-warning{border-left-color:#f59e0b}.flow-stage{background:#172033;border:1px solid #334155;border-radius:12px;padding:18px;text-align:center}.flow-number{color:#38bdf8;font-size:.72rem}.flow-title{color:#f8fafc;font-weight:700;margin-top:8px}.flow-description{color:#cbd5e1;padding:18px 4px}.flow-arrow{color:#38bdf8;font-size:2rem;text-align:center;padding-top:18px}
 [data-testid="stSidebar"] [data-testid="stButton"] button{justify-content:flex-start;border-radius:7px;font-weight:600;min-height:42px;margin:2px 0}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]{background:transparent;border-color:transparent;color:#e5e7eb}
 [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover{background:#1f2937;border-color:transparent;color:#fff}

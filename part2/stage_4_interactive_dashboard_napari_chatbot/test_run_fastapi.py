@@ -9,7 +9,10 @@ from time import perf_counter
 from fastapi import HTTPException
 
 from part2.stage_4_interactive_dashboard_napari_chatbot.run_fastapi import (
+    ChatRequest,
+    _chat_format_metric,
     _chat_response,
+    chat,
     current_state,
     publish_active_strut,
     publish_selection,
@@ -57,7 +60,21 @@ class ChatListingTests(unittest.TestCase):
         response = _chat_response("Where is the largest deviation?", active_strut_id=strut_id)
 
         self.assertEqual(response["strut_id"], strut_id)
-        self.assertIn("position_fraction", response["reply"])
+        self.assertIn("position fraction", response["reply"])
+
+    def test_chat_measurements_use_two_decimal_places(self):
+        self.assertEqual(_chat_format_metric(3225.5712106704714, "length"), "3,225.57 µm")
+        self.assertEqual(_chat_format_metric(0.6043185424804688, "occupancy"), "60.43 %")
+
+    def test_single_strut_summary_is_labeled_and_rounded(self):
+        strut_id = int(store.defect_by_strut.iloc[0]["strut_id"])
+        response = _chat_response(f"Inspect strut {strut_id}")
+
+        self.assertEqual(response["result_type"], "strut_summary")
+        self.assertTrue(response["reply"].startswith(f"### Strut {strut_id}"))
+        self.assertIn("**Length:**", response["reply"])
+        self.assertIn("**Median diameter:**", response["reply"])
+        self.assertNotIn("**secondary defects:** nan", response["reply"].casefold())
 
     def test_explicit_strut_list_selects_each_valid_id(self):
         strut_ids = store.defect_by_strut.iloc[:4]["strut_id"].astype(int).tolist()
@@ -130,6 +147,56 @@ class ChatListingTests(unittest.TestCase):
         self.assertEqual(response["select_strut_ids"], expected)
         self.assertIn(f"Selected all {len(expected)}", response["reply"])
 
+    def test_dashboard_defect_prompts_select_every_primary_defect_category(self):
+        categories = sorted(
+            {
+                str(value) for value in store.defect_by_strut["primary_defect"].dropna()
+                if str(value).strip().casefold() not in {"", "nominal", "nan", "unknown"}
+            },
+            key=str.casefold,
+        )
+
+        for category in categories:
+            with self.subTest(category=category):
+                expected = store.defect_by_strut.loc[
+                    store.defect_by_strut["primary_defect"].astype(str).str.casefold() == category.casefold(),
+                    "strut_id",
+                ].astype(int).tolist()
+                response = _chat_response(
+                    f"Inspect all struts with primary defect {category}"
+                )
+
+                self.assertNotEqual(response.get("result_type"), "strut_summary")
+                self.assertEqual(response["select_strut_ids"], expected)
+                self.assertEqual(response["strut_ids"], expected)
+                self.assertEqual(response["total"], len(expected))
+
+                published = asyncio.run(chat(ChatRequest(message=f"Inspect all struts with primary defect {category}")))
+                self.assertEqual(published["selection"]["strut_ids"], expected)
+                self.assertEqual(published["selection"]["active_strut_id"], expected[0])
+
+    def test_defect_selection_includes_a_triage_summary(self):
+        response = _chat_response("Inspect all struts with primary defect Bent")
+        expected = store.defect_by_strut[
+            store.defect_by_strut["primary_defect"].astype(str).str.casefold() == "bent"
+        ]
+        summary = response["category_summary"]
+
+        self.assertEqual(response["result_type"], "category_summary")
+        self.assertEqual(summary["count"], len(expected))
+        self.assertAlmostEqual(summary["dataset_share"], len(expected) / len(store.dashboard_summary))
+        self.assertEqual(
+            summary["needs_review_count"],
+            int(expected["needs_review"].astype(str).str.strip().str.casefold().isin({"true", "1", "yes"}).sum()),
+        )
+        self.assertEqual(
+            summary["stage2_classification_counts"],
+            expected["stage2_classification"].fillna("Unknown").astype(str).value_counts().sort_index().to_dict(),
+        )
+        self.assertEqual(set(summary["metrics"]), {"occupancy", "median_diameter", "max_deviation"})
+        self.assertIn("### Bent defect summary", response["reply"])
+        self.assertIn("Selected all", response["reply"])
+
     def test_count_question_does_not_change_selection(self):
         response = _chat_response("How many struts are bent?")
 
@@ -154,6 +221,7 @@ class ChatListingTests(unittest.TestCase):
             "Which struts are Missing Intentional?",
             "Which struts are missing-intentional?",
             "Which struts are MISSING_INTENTIONAL?",
+            "Which struts are Missing by Design?",
         ):
             response = _chat_response(prompt)
             self.assertEqual(response["field"], "stage2_classification")
@@ -169,6 +237,43 @@ class ChatListingTests(unittest.TestCase):
             {"Missing_Intentional": 87, "Missing_Unintentional": 331},
         )
         self.assertIn("Please specify", response["reply"])
+        self.assertIn("Missing by Design", response["reply"])
+        self.assertIn("Missing by Accident", response["reply"])
+
+    def test_chat_explains_known_data_terms(self):
+        response = _chat_response("What does material occupancy mean?")
+
+        self.assertEqual(response["result_type"], "glossary")
+        self.assertIn("sampled fraction", response["reply"])
+
+    def test_chat_compares_current_strut_with_nominal_baseline(self):
+        strut_id = int(store.defect_by_strut.iloc[0]["strut_id"])
+        response = _chat_response("Compare this strut with all nominal struts", active_strut_id=strut_id)
+
+        self.assertEqual(response["result_type"], "comparison")
+        self.assertEqual(response["strut_ids"], [strut_id])
+        self.assertIn("nominal_median", next(iter(response["comparison"].values())))
+
+    def test_chat_ranks_and_selects_requested_struts(self):
+        response = _chat_response("Show the top 3 struts by maximum deviation")
+
+        self.assertEqual(response["result_type"], "ranking")
+        self.assertEqual(len(response["strut_ids"]), 3)
+        self.assertEqual(response["select_strut_ids"], response["strut_ids"])
+
+    def test_chat_summarizes_multiple_explicit_struts(self):
+        strut_ids = store.defect_by_strut.iloc[:2]["strut_id"].astype(int).tolist()
+        response = _chat_response("Inspect struts " + ", ".join(map(str, strut_ids)))
+
+        self.assertEqual(response["result_type"], "multi_strut_summary")
+        self.assertEqual(response["strut_ids"], strut_ids)
+        self.assertEqual(response["total"], len(strut_ids))
+
+    def test_chat_reports_unknown_explicit_strut(self):
+        response = _chat_response("Inspect strut 999999999")
+
+        self.assertEqual(response["result_type"], "unknown_strut")
+        self.assertIn("loaded dataset", response["reply"])
 
 
 if __name__ == "__main__":
